@@ -18,6 +18,9 @@ services:
     image: mwaeckerlin/postfixadmin
     build: postfixadmin
     environment:
+      # setup password is: test123
+      # set to anything else to generate a different one
+      SETUP_PASSWORD: 0310f894fb05ed0cf05de3d61abc0ced:c56c4bc25f893e52f6e806a907e30e59edb6e120
       DATABASE_PASSWORD: eepaiph3ohquai2Eilae-change-it
     volumes:
       - type: volume
