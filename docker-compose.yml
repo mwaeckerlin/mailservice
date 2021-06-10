@@ -1,0 +1,65 @@
+version: "3.4"
+
+services:
+  nginx:
+    image: mwaeckerlin/nginx
+    ports:
+      - 8080:8080
+    volumes:
+      - type: volume
+        source: postfixadmin
+        target: /app
+        volume:
+          nocopy: true
+    networks:
+      - postfixadmin-frontend
+
+  php-fpm:
+    image: mwaeckerlin/postfixadmin
+    build: postfixadmin
+    environment:
+      DATABASE_PASSWORD: eepaiph3ohquai2Eilae-change-it
+    volumes:
+      - type: volume
+        source: postfixadmin
+        target: /app
+        volume:
+          nocopy: false
+    networks:
+      - postfixadmin-frontend
+      - postfixadmin-backend
+
+  postfixadmin-db:
+    image: mysql
+    command: mysqld --default-authentication-plugin=mysql_native_password
+    environment:
+      MYSQL_RANDOM_ROOT_PASSWORD: "yes"
+      MYSQL_DATABASE: postfixadmin
+      MYSQL_USER: postfixadmin
+      MYSQL_PASSWORD: eepaiph3ohquai2Eilae-change-it
+    volumes:
+      - type: volume
+        source: postfixadmin-db
+        target: /usr/lib/mysql
+    networks:
+      - postfixadmin-backend
+
+#  postgrey:
+#    image: mwaeckerlin/postgrey
+#    build: postgrey
+
+#  smtp-relay-tls:
+#    image: mwaeckerlin/smtp-relay-tls
+#    build: smtp-relay-tls
+
+#  postfix:
+#    image: mwaeckerlin/postfix
+#    build: postfix
+
+networks:
+  postfixadmin-backend:
+  postfixadmin-frontend:
+
+volumes:
+  postfixadmin:
+  postfixadmin-db:

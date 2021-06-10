@@ -1,0 +1,21 @@
+[submodule "mailforward"]
+	path = mailforward
+	url = git@github.com:mwaeckerlin/mailforward.git
+[submodule "smtp-relay"]
+	path = smtp-relay
+	url = git@github.com:mwaeckerlin/smtp-relay.git
+[submodule "smtp-relay-tls"]
+	path = smtp-relay-tls
+	url = git@github.com:mwaeckerlin/smtp-relay-tls.git
+[submodule "postgrey"]
+	path = postgrey
+	url = git@github.com:mwaeckerlin/postgrey.git
+[submodule "dovecot"]
+	path = dovecot
+	url = git@github.com:mwaeckerlin/dovecot.git
+[submodule "postfix"]
+	path = postfix
+	url = git@github.com:mwaeckerlin/postfix.git
+[submodule "postfixadmin"]
+	path = postfixadmin
+	url = git@github.com:mwaeckerlin/postfixadmin.git
