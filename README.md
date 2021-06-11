@@ -10,7 +10,7 @@ Start:
 
     docker-compose up
 
-Wait for the base is initialized and outputs:
+Wait until the database is initialized and outputs:
 
 > postfixadmin-db_1 | 2021-06-10T19:41:31.466095Z 0 [System] [MY-010931] [Server] /usr/sbin/mysqld: ready for connections. Version: '8.0.25' socket: '/var/run/mysqld/mysqld.sock' port: 3306 MySQL Community Server - GPL.
 
