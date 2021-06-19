@@ -1,7 +1,7 @@
 version: "3.4"
 
 services:
-  nginx:
+  postfixadmin:
     image: mwaeckerlin/nginx
     ports:
       - 8080:8080
@@ -19,7 +19,7 @@ services:
     build: postfixadmin
     environment:
       # setup password is: test123
-      # set to anything else to generate a different one
+      # set to anything else to generate a different one, e.g. empty
       SETUP_PASSWORD: 0310f894fb05ed0cf05de3d61abc0ced:c56c4bc25f893e52f6e806a907e30e59edb6e120
       DATABASE_PASSWORD: eepaiph3ohquai2Eilae-change-it
     volumes:
@@ -29,8 +29,15 @@ services:
         volume:
           nocopy: false
     networks:
-      - postfixadmin-frontend
-      - postfixadmin-backend
+      postfixadmin-frontend:
+        aliases:
+          - merkur.mrw.sh
+          - merkur
+          - demo
+          - test
+          - lokal
+          - extern
+      postfixadmin-backend:
 
   postfixadmin-db:
     image: mysql
@@ -46,22 +53,67 @@ services:
         target: /usr/lib/mysql
     networks:
       - postfixadmin-backend
+      - postfix-backend
 
-#  postgrey:
-#    image: mwaeckerlin/postgrey
-#    build: postgrey
+  postgrey:
+    image: mwaeckerlin/postgrey
+    build: postgrey
+    networks:
+      - greylisting
 
-#  smtp-relay-tls:
-#    image: mwaeckerlin/smtp-relay-tls
-#    build: smtp-relay-tls
+  smtp-relay:
+    image: mwaeckerlin/smtp-relay
+    build: smtp-relay
 
-#  postfix:
-#    image: mwaeckerlin/postfix
-#    build: postfix
+  smtp-relay-tls:
+    image: mwaeckerlin/smtp-relay-tls
+    build: smtp-relay-tls
+
+  mailforward:
+    image: mwaeckerlin/mailforward
+    build: mailforward
+    environment:
+      GREYLIST: "postgrey"
+      LOCAL_DOMAINS: "merkur.mrw.sh localhost demo test lokal extern"
+
+  dovecot:
+    image: mwaeckerlin/dovecot
+    build: dovecot
+    ports:
+      - "143:143"
+      - "993:993"
+      - "4190:4190"
+    environment:
+      DB_NAME: postfixadmin
+      DB_USER: postfixadmin
+      DB_PASSWORD: eepaiph3ohquai2Eilae-change-it
+      DB_HOST: postfixadmin-db
+    networks:
+      - postfix-backend
+
+  postfix:
+    image: mwaeckerlin/postfix
+    build: postfix
+    ports:
+      - "25:25"
+      - "587:25"
+    environment:
+      GREYLIST: "postgrey"
+      HOSTNAME: merkur.mrw.sh
+      DOMAIN: mrw.sh
+      DB_NAME: postfixadmin
+      DB_USER: postfixadmin
+      DB_PASSWORD: eepaiph3ohquai2Eilae-change-it
+      DB_HOST: postfixadmin-db
+    networks:
+      - postfix-backend
+      - greylisting
 
 networks:
   postfixadmin-backend:
   postfixadmin-frontend:
+  postfix-backend:
+  greylisting:
 
 volumes:
   postfixadmin:
