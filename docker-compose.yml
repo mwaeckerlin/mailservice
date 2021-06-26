@@ -1,20 +1,15 @@
 version: "3.4"
 
 services:
-  postfixadmin:
-    image: mwaeckerlin/nginx
+  postfixadmin-proxy:
+    image: mwaeckerlin/postfixadmin-proxy
+    build: postfixadmin-proxy
     ports:
       - 8080:8080
-    volumes:
-      - type: volume
-        source: postfixadmin
-        target: /app
-        volume:
-          nocopy: true
     networks:
       - postfixadmin-frontend
 
-  php-fpm:
+  postfixadmin:
     image: mwaeckerlin/postfixadmin
     build: postfixadmin
     environment:
@@ -22,12 +17,16 @@ services:
       # set to anything else to generate a different one, e.g. empty
       SETUP_PASSWORD: 0310f894fb05ed0cf05de3d61abc0ced:c56c4bc25f893e52f6e806a907e30e59edb6e120
       DATABASE_PASSWORD: eepaiph3ohquai2Eilae-change-it
-    volumes:
-      - type: volume
-        source: postfixadmin
-        target: /app
-        volume:
-          nocopy: false
+      DEFAULT_ALIASES_ADDRESS: info
+      #DEFAULT_ALIASES_DOMAIN: merkur.mrw.sh
+      FOOTER_TEXT: "Mailservice Project"
+      FOOTER_LINK: "https://github.com/mwaeckerlin/mailservice"
+      WELCOME_TEXT: |
+        Hi,
+
+        Welcome to your new mail account!
+      SHOW_CUSTOM_DOMAINS: "merkur.mrw.sh localhost"
+      SHOW_CUSTOM_COLORS: "green red"
     networks:
       postfixadmin-frontend:
         aliases:
@@ -116,5 +115,4 @@ networks:
   greylisting:
 
 volumes:
-  postfixadmin:
   postfixadmin-db:

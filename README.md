@@ -23,6 +23,7 @@ The configured setup password is `test123` — that's good for testing, not for 
 ## PostfixAdmin
 
 Includes: https://github.com/mwaeckerlin/postfixadmin
+Includes: https://github.com/mwaeckerlin/postfixadmin-proxy
 
 To upgrade the Postfixadmin by upgrading the image, you need to remove the `mailservice/postfixadmin` volume:
 
@@ -40,10 +41,16 @@ docker-compose build
 docker-compose up
 ```
 
-## DoveCot IMAP (to do)
+## DoveCot IMAP
 
-## Postfix (to do)
+Includes: https://github.com/mwaeckerlin/dovecot
 
-## PostGrey (to do)
+## Postfix
+
+Includes: https://github.com/mwaeckerlin/postfix
+
+## PostGrey
+
+Includes: https://github.com/mwaeckerlin/postgrey
 
 ## Virus Scan (to do)

@@ -19,3 +19,6 @@
 [submodule "postfixadmin"]
 	path = postfixadmin
 	url = git@github.com:mwaeckerlin/postfixadmin.git
+[submodule "postfixadmin-proxy"]
+	path = postfixadmin-proxy
+	url = git@github.com:mwaeckerlin/postfixadmin-proxy.git
