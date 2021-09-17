@@ -22,3 +22,6 @@
 [submodule "postfixadmin-proxy"]
 	path = postfixadmin-proxy
 	url = git@github.com:mwaeckerlin/postfixadmin-proxy.git
+[submodule "rainloop"]
+	path = rainloop
+	url = git@github.com:mwaeckerlin/rainloop.git

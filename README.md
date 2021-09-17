@@ -20,6 +20,13 @@ Wait for a long time and create an admin.
 
 The configured setup password is `test123` — that's good for testing, not for production. To change it, set variable `SETUP_PASSWORD` in `docker-compose.yml` to anything else, e.g.: `SETUP_PASSWORD: ChangeMe` before you open http://localhost:8080/public/setup.php the first time (or delete the database, see below), then follow the instructions on the page and you get a new hash to set in `SETUP_DATABASE`.
 
+If you use TLS, Configuration parameters are:
+ - IMAP: `SSL/TLS` (port: `993`)
+ - SMTP: `StartTLS` (port: `578`)
+ - SIEVE: `StartTLS` (port: `4190`)
+
+Access rights for the volumes, if on a local filesystem, must be set to: `100:1000`
+
 ## PostfixAdmin
 
 Includes: https://github.com/mwaeckerlin/postfixadmin
@@ -54,3 +61,14 @@ Includes: https://github.com/mwaeckerlin/postfix
 Includes: https://github.com/mwaeckerlin/postgrey
 
 ## Virus Scan (to do)
+
+## Frontend: Rainloop Web-Mailer
+
+Modern Web-Mailer to be used as frontend. It is completly independent from the mail server, but it fits well together. Just go to the subdirectory `rainloop` and follow the instructions in the `README.md`, then configure your mailserver.
+
+If you use TLS, Configuration parameters are:
+ - IMAP: `SSL/TLS` (port: `993`)
+ - SMTP: `StartTLS` (port: `578`)
+ - SIEVE: `StartTLS` (port: `4190`)
+
+Includes: https://github.com/mwaeckerlin/rainloop
