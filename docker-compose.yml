@@ -99,6 +99,7 @@ services:
     environment:
       GREYLIST: "postgrey"
       HOSTNAME: merkur.mrw.sh
+      HOSTROOT: mrw.sh
       DOMAIN: mrw.sh
       DB_NAME: postfixadmin
       DB_USER: postfixadmin
