@@ -1,5 +1,3 @@
-version: "3.4"
-
 services:
   postfixadmin-proxy:
     image: mwaeckerlin/postfixadmin-proxy
@@ -38,6 +36,7 @@ services:
           - extern
       postfixadmin-backend:
 
+
   postfixadmin-db:
     image: mysql
     command: mysqld --default-authentication-plugin=mysql_native_password
@@ -57,6 +56,10 @@ services:
   postgrey:
     image: mwaeckerlin/postgrey
     build: postgrey
+    volumes:
+      - type: volume
+        source: postgrey-db
+        target: /data
     networks:
       - greylisting
 
@@ -115,5 +118,7 @@ networks:
   postfix-backend:
   greylisting:
 
+
 volumes:
   postfixadmin-db:
+  postgrey-db:

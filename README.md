@@ -1,14 +1,18 @@
 # MailService
 
-Collection of Docker images for full Mailservice: SMTP/TLS + IMAPS + PostGrey + SPAM filter; built using several subprojects.
+Collection of Docker images for full Mailservice: SMTP/TLS + IMAPS + Greylisting (milter-greylist) + SPAM filter; built using several subprojects.
 
 Build the images:
 
-    docker-compose build
+    npm run build
 
-Start:
+Start in foreground (see logs in real-time):
 
-    docker-compose up
+    npm start
+
+Start in background (daemon mode):
+
+    npm run start:daemon
 
 Wait until the database is initialized and outputs:
 
@@ -56,9 +60,9 @@ Includes: https://github.com/mwaeckerlin/dovecot
 
 Includes: https://github.com/mwaeckerlin/postfix
 
-## PostGrey
+## Greylisting
 
-Includes: https://github.com/mwaeckerlin/postgrey
+Includes: https://github.com/mwaeckerlin/postgrey (now uses milter-greylist)
 
 ## Virus Scan (to do)
 
