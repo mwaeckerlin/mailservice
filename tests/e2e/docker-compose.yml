@@ -1,0 +1,88 @@
+services:
+
+  postfix:
+    build: ../../postfix
+    hostname: postfix.test.local
+    environment:
+      GREYLIST:       postgrey
+      DOMAIN:         test.local
+      HOSTNAME:       mail.test.local
+      HOSTROOT:       test.local
+      DB_HOST:        db
+      DB_USER:        postfixadmin
+      DB_PASSWORD:    testpass
+      DB_NAME:        postfixadmin
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [mail, greylisting, db-net]
+
+  dovecot:
+    build: ../../dovecot
+    environment:
+      DB_HOST:              db
+      DB_USER:              postfixadmin
+      DB_PASSWORD:          testpass
+      DB_NAME:              postfixadmin
+      DOMAIN:               test.local
+      DEFAULT_PASS_SCHEME:  PLAIN
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [mail, db-net]
+
+  postgrey:
+    build: ../../postgrey
+    # Override CMD: 5 s greylist delay, auto-whitelist after 1 success
+    command: ["-w", "5", "-A", "-a", "1"]
+    networks: [greylisting]
+
+  db:
+    image: mariadb:11
+    environment:
+      MYSQL_DATABASE:             postfixadmin
+      MYSQL_USER:                 postfixadmin
+      MYSQL_PASSWORD:             testpass
+      MYSQL_RANDOM_ROOT_PASSWORD: "yes"
+    volumes:
+      - ./init/db.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD", "mariadb-admin", "ping", "-h", "localhost", "-u", "postfixadmin", "-ptestpass"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks: [db-net]
+
+  fake-smtp:
+    build: ../../../fake-smtp
+    volumes:
+      - fake-mails:/mails
+    networks: [mail]
+
+  test-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on: [postfix, dovecot, postgrey]
+    environment:
+      POSTFIX_HOST:   postfix
+      DOVECOT_HOST:   dovecot
+      SMTP_PORT:      "25"
+      IMAP_PORT:      "143"
+      POP3_PORT:      "110"
+      SIEVE_PORT:     "4190"
+      MAIL_DOMAIN:    test.local
+      ALICE_USER:     alice@test.local
+      ALICE_PASS:     alicepass
+      BOB_USER:       bob@test.local
+      BOB_PASS:       bobpass
+    networks: [mail, greylisting]
+    command: ["pytest", "-v", "--tb=short"]
+
+networks:
+  mail:
+  greylisting:
+  db-net:
+
+volumes:
+  fake-mails:
