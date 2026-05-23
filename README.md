@@ -66,13 +66,74 @@ Includes: https://github.com/mwaeckerlin/postgrey (now uses milter-greylist)
 
 ## Virus Scan (to do)
 
-## Frontend: Rainloop Web-Mailer
+## Frontend: SnappyMail Web-Mailer
 
-Modern Web-Mailer to be used as frontend. It is completly independent from the mail server, but it fits well together. Just go to the subdirectory `rainloop` and follow the instructions in the `README.md`, then configure your mailserver.
+[SnappyMail](https://snappymail.eu/) is the actively maintained successor to RainLoop. It includes the same PHP FPM + nginx container setup and is a drop-in replacement. See `rainloop/README.md` for migration instructions.
 
-If you use TLS, Configuration parameters are:
+If you use TLS, configuration parameters are:
  - IMAP: `SSL/TLS` (port: `993`)
  - SMTP: `StartTLS` (port: `578`)
  - SIEVE: `StartTLS` (port: `4190`)
 
-Includes: https://github.com/mwaeckerlin/rainloop
+## Local Development
+
+`docker-compose.local.yml` is an overlay for local testing — no root required, outbound mail is intercepted, a webmailer is included.
+
+### Start
+
+```bash
+npm run start:local          # foreground (live logs)
+npm run start:local:daemon   # background
+```
+
+### Services and ports
+
+| Service | Address | Description |
+|---------|---------|-------------|
+| PostfixAdmin | http://localhost:8080 | Manage mail accounts and domains |
+| SnappyMail | http://localhost:8081 | Webmailer |
+| SMTP | localhost:2525 | Submit mail (`swaks --port 2525`) |
+| SMTP submission | localhost:5870 | Authenticated submission |
+| IMAP | localhost:1143 | Retrieve mail |
+| POP3 | localhost:1110 | Retrieve mail |
+| IMAPS | localhost:1993 | IMAP over TLS |
+| POP3S | localhost:1995 | POP3 over TLS |
+| ManageSieve | localhost:4190 | Manage Sieve filter scripts |
+| fake-smtp direct | localhost:2526 | Send directly to the mail trap |
+
+All outbound mail is captured by [fake-smtp](../fake-smtp) — nothing leaves your machine.
+
+### One-time setup
+
+**1. PostfixAdmin**
+
+Open http://localhost:8080/public/setup.php — setup password is `test123`.
+Create an admin account, then add domain `localhost` and at least one mailbox (e.g. `alice@localhost`).
+
+**2. SnappyMail admin**
+
+Open http://localhost:8081/?admin — default password `12345`.
+
+Add a domain configuration:
+- IMAP server: `dovecot`, port `143`
+- SMTP server: `postfix`, port `25`
+
+### Send and receive test mails
+
+Send from the host:
+
+```bash
+swaks --to alice@localhost --server localhost --port 2525
+```
+
+Log in to SnappyMail at http://localhost:8081 with the credentials you created in PostfixAdmin.
+
+Inspect outbound mail caught by fake-smtp:
+
+```bash
+# list captured mails
+docker compose -f docker-compose.yml -f docker-compose.local.yml exec fake-smtp ls /mails
+
+# read a captured mail
+docker compose -f docker-compose.yml -f docker-compose.local.yml exec fake-smtp cat /mails/<filename>
+```
