@@ -1,0 +1,76 @@
+# Local development overlay — use with:
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up
+#
+# What this adds / changes vs. production:
+#  - SMTP on port 2525 (no root required), submission on 5870
+#  - IMAP on 1143, POP3 on 1110, ManageSieve on 4190
+#  - SnappyMail webmailer on http://localhost:8081
+#  - fake-smtp catches all outbound mail (nothing leaves your machine)
+#  - postfix configured for domain "localhost"
+
+services:
+
+  # Remap privileged ports so no sudo needed
+  postfix:
+    ports:
+      - "2525:25"    # SMTP  → telnet localhost 2525  or  swaks --port 2525
+      - "5870:25"    # submission (same port in container)
+    environment:
+      DOMAIN:    localhost
+      HOSTNAME:  localhost
+      HOSTROOT:  localhost
+      RELAYHOST: fake-smtp   # all outbound mail caught by fake-smtp
+    networks:
+      - postfix-backend
+      - greylisting
+      - fakesmtp-net
+
+  dovecot:
+    ports:
+      - "1110:110"   # POP3
+      - "1143:143"   # IMAP
+      - "1993:993"   # IMAPS
+      - "1995:995"   # POP3S
+      - "4190:4190"  # ManageSieve
+
+  # Webmailer
+  snappymail:
+    image: mwaeckerlin/snappymail:php-fpm
+    build:
+      context: rainloop
+      dockerfile: Dockerfile.php-fpm
+      target: php-fpm
+    volumes:
+      - snappymail-data:/app/snappymail/data
+    networks:
+      - postfix-backend
+      - snappymail-net
+
+  snappymail-proxy:
+    image: mwaeckerlin/snappymail:nginx
+    build:
+      context: rainloop
+      dockerfile: Dockerfile.nginx
+    ports:
+      - "8081:8080"  # Webmailer → http://localhost:8081
+    networks:
+      - snappymail-net
+
+  # Catch all outbound mail — nothing reaches the internet
+  fake-smtp:
+    image: mwaeckerlin/fake-smtp
+    build: ../fake-smtp
+    ports:
+      - "2526:25"    # optional: send test mails directly to fake-smtp
+    volumes:
+      - fake-mails:/mails
+    networks:
+      - fakesmtp-net
+
+networks:
+  snappymail-net:
+  fakesmtp-net:
+
+volumes:
+  snappymail-data:
+  fake-mails:
