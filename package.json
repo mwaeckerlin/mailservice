@@ -10,6 +10,7 @@
     "start:local:daemon": "docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build --force-recreate --remove-orphans",
     "stop": "docker compose down",
     "test": "npm run test:e2e",
-    "test:e2e": "bash tests/run-e2e.sh"
+    "test:e2e": "bash tests/run-e2e.sh",
+    "test:ui": "bash tests/run-ui.sh"
   }
 }

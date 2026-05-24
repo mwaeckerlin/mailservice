@@ -38,6 +38,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     networks; postfix wired to both milters with `MYNETWORKS=127.0.0.0/8`.
   - `conftest.py`: `OPENDKIM_HOST` config variable for optional service detection.
   - `run-e2e.sh`: starts `opendkim` and `dns` services alongside the rest of the stack.
+- **Frontend UI test suite** (`tests/e2e/`):
+  - `Dockerfile.playwright`: Playwright Python image for browser-based tests.
+  - `requirements.playwright.txt`: `pytest` + `pytest-playwright` dependencies.
+  - `docker-compose.ui.yml`: overlay adding PostfixAdmin (own DB), SnappyMail, and the
+    Playwright `ui-test-runner` service alongside the existing mail stack.
+  - `test_webui.py`: tests PostfixAdmin admin setup/login/domain/mailbox creation and
+    SnappyMail domain config, user login, mail reading, and mail sending end-to-end.
+  - `run-ui.sh`: starts the full UI test stack and runs Playwright tests.
+  - `package.json`: new `test:ui` script (`bash tests/run-ui.sh`).
 
 ### Changed
 

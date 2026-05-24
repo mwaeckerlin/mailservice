@@ -1,0 +1,5 @@
+FROM mcr.microsoft.com/playwright/python:v1.52-jammy
+WORKDIR /tests
+COPY requirements.playwright.txt ./
+RUN pip install --no-cache-dir -r requirements.playwright.txt
+COPY . .

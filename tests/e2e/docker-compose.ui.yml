@@ -1,0 +1,102 @@
+# UI test overlay — run with:
+#   docker compose -f docker-compose.yml -f docker-compose.ui.yml up
+#
+# Adds: PostfixAdmin (own DB), SnappyMail, and a Playwright UI test runner.
+# PostfixAdmin uses its own postfixadmin-db; postfix/dovecot keep the
+# existing minimal db with alice/bob pre-seeded.
+
+services:
+
+  postfixadmin-db:
+    image: mariadb:11
+    environment:
+      MYSQL_DATABASE: postfixadmin
+      MYSQL_USER: postfixadmin
+      MYSQL_PASSWORD: testpass
+      MYSQL_RANDOM_ROOT_PASSWORD: "yes"
+    healthcheck:
+      test: ["CMD", "mariadb-admin", "ping", "-h", "localhost", "-u", "postfixadmin", "-ptestpass"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks: [ui-net]
+
+  postfixadmin:
+    build: ../../postfixadmin
+    environment:
+      DATABASE_TYPE:          mysqli
+      DATABASE_HOST:          postfixadmin-db
+      DATABASE_NAME:          postfixadmin
+      DATABASE_USER:          postfixadmin
+      DATABASE_PASSWORD:      testpass
+      # setup password is: test123
+      SETUP_PASSWORD:         "0310f894fb05ed0cf05de3d61abc0ced:c56c4bc25f893e52f6e806a907e30e59edb6e120"
+      ALIASES:                "10"
+      MAILBOXES:              "10"
+      MAXQUOTA:               "10"
+      DOMAIN_QUOTA_DEFAULT:   "2048"
+    depends_on:
+      postfixadmin-db:
+        condition: service_healthy
+    networks: [ui-net]
+
+  postfixadmin-proxy:
+    build: ../../postfixadmin-proxy
+    depends_on: [postfixadmin]
+    networks: [ui-net]
+
+  snappymail:
+    build:
+      context: ../../rainloop
+      dockerfile: Dockerfile.php-fpm
+      target: php-fpm
+    volumes:
+      - snappymail-data:/app/snappymail/data
+    networks: [ui-net, mail]
+
+  snappymail-proxy:
+    build:
+      context: ../../rainloop
+      dockerfile: Dockerfile.nginx
+    depends_on: [snappymail]
+    networks: [ui-net]
+
+  ui-test-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.playwright
+    depends_on:
+      postfixadmin-proxy:
+        condition: service_started
+      snappymail-proxy:
+        condition: service_started
+      postfix:
+        condition: service_started
+      dovecot:
+        condition: service_started
+      postgrey:
+        condition: service_healthy
+    environment:
+      POSTFIXADMIN_URL:   "http://postfixadmin-proxy:8080"
+      SNAPPYMAIL_URL:     "http://snappymail-proxy:8080"
+      POSTFIX_HOST:       postfix
+      DOVECOT_HOST:       dovecot
+      SMTP_PORT:          "25"
+      IMAP_PORT:          "143"
+      ALICE_USER:         alice@test.local
+      ALICE_PASS:         alicepass
+      BOB_USER:           bob@test.local
+      BOB_PASS:           bobpass
+      MAIL_DOMAIN:        test.local
+      ADMIN_USER:         admin@test.local
+      ADMIN_PASS:         Admin123pass
+      SETUP_PASS:         test123
+      SM_ADMIN_PASS:      "12345"
+    networks: [ui-net, mail]
+    command: ["pytest", "-v", "--tb=short", "test_webui.py"]
+
+networks:
+  ui-net:
+
+volumes:
+  snappymail-data:
