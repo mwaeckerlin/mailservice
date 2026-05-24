@@ -19,11 +19,19 @@ services:
       DOMAIN:    localhost
       HOSTNAME:  localhost
       HOSTROOT:  localhost
+      OPENDKIM:  opendkim
       RELAYHOST: fake-smtp   # all outbound mail caught by fake-smtp
     networks:
       - postfix-backend
       - greylisting
       - fakesmtp-net
+      - dkim-net
+
+  opendkim:
+    environment:
+      DOMAIN: localhost
+    networks:
+      - dkim-net
 
   dovecot:
     ports:

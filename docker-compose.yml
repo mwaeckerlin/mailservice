@@ -63,6 +63,18 @@ services:
     networks:
       - greylisting
 
+  opendkim:
+    image: mwaeckerlin/opendkim
+    build: opendkim
+    environment:
+      DOMAIN: mrw.sh
+    volumes:
+      - type: volume
+        source: dkim-keys
+        target: /etc/opendkim/keys
+    networks:
+      - dkim-net
+
   smtp-relay:
     image: mwaeckerlin/smtp-relay
     build: smtp-relay
@@ -103,6 +115,7 @@ services:
       - "587:25"
     environment:
       GREYLIST: "postgrey"
+      OPENDKIM: "opendkim"
       HOSTNAME: merkur.mrw.sh
       HOSTROOT: mrw.sh
       DOMAIN: mrw.sh
@@ -113,14 +126,17 @@ services:
     networks:
       - postfix-backend
       - greylisting
+      - dkim-net
 
 networks:
   postfixadmin-backend:
   postfixadmin-frontend:
   postfix-backend:
   greylisting:
+  dkim-net:
 
 
 volumes:
   postfixadmin-db:
   postgrey-db:
+  dkim-keys:

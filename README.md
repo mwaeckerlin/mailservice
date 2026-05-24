@@ -22,11 +22,11 @@ Open in Browser: http://localhost:8080/public/setup.php
 
 Wait for a long time and create an admin.
 
-The configured setup password is `test123` — that's good for testing, not for production. To change it, set variable `SETUP_PASSWORD` in `docker-compose.yml` to anything else, e.g.: `SETUP_PASSWORD: ChangeMe` before you open http://localhost:8080/public/setup.php the first time (or delete the database, see below), then follow the instructions on the page and you get a new hash to set in `SETUP_DATABASE`.
+The configured setup password is `test123` — that's good for testing, not for production. To change it, set variable `SETUP_PASSWORD` in `docker compose.yml` to anything else, e.g.: `SETUP_PASSWORD: ChangeMe` before you open http://localhost:8080/public/setup.php the first time (or delete the database, see below), then follow the instructions on the page and you get a new hash to set in `SETUP_DATABASE`.
 
 If you use TLS, Configuration parameters are:
  - IMAP: `SSL/TLS` (port: `993`)
- - SMTP: `StartTLS` (port: `578`)
+ - SMTP: `StartTLS` (port: `587`)
  - SIEVE: `StartTLS` (port: `4190`)
 
 Access rights for the volumes, if on a local filesystem, must be set to: `100:1000`
@@ -39,17 +39,17 @@ Includes: https://github.com/mwaeckerlin/postfixadmin-proxy
 To upgrade the Postfixadmin by upgrading the image, you need to remove the `mailservice/postfixadmin` volume:
 
 ```
-docker-compose rm -vfs
+docker compose rm -vfs
 docker volume rm mailservice_postfixadmin
 ```
 
 Completly delete the database (loose al data), rebuild and use the new distribuition:
 
 ```
-docker-compose rm -vfs
+docker compose rm -vfs
 docker volume rm mailservice_postfixadmin mailservice_postfixadmin-db
-docker-compose build
-docker-compose up
+docker compose build
+docker compose up
 ```
 
 ## DoveCot IMAP
@@ -64,6 +64,140 @@ Includes: https://github.com/mwaeckerlin/postfix
 
 Includes: https://github.com/mwaeckerlin/postgrey (now uses milter-greylist)
 
+## SPF, DKIM and DMARC
+
+### SPF (Sender Policy Framework)
+
+SPF lets receiving servers verify that inbound mail claiming to come from your domain was sent by an authorised server.
+
+**Incoming check (server-side)**
+
+The postfix container runs `postfix-policyd-spf-perl` automatically. It checks SPF on every incoming message and rejects mail that fails a hard SPF fail (`-all`). To disable it:
+
+```yaml
+postfix:
+  environment:
+    CHECK_SPF: "no"
+```
+
+**Outgoing DNS record**
+
+Add a TXT record to your domain's DNS. Minimal example (only your MX servers may send):
+
+```
+Name:  example.com
+Type:  TXT
+Value: v=spf1 mx ~all
+```
+
+Replace `~all` (softfail) with `-all` (hardfail) once you are confident that all legitimate senders are listed.
+
+Common modifiers:
+- `mx` — allow your MX servers
+- `a` — allow the A record of the domain itself
+- `ip4:1.2.3.4` — allow a specific IP
+- `include:sendgrid.net` — delegate to a third-party SPF record
+
+---
+
+### DKIM (DomainKeys Identified Mail)
+
+DKIM adds a cryptographic signature to every outgoing message. Receiving servers use the public key published in DNS to verify the signature and confirm the message was not tampered with.
+
+**How it works in this stack**
+
+The `opendkim` service signs outgoing mail and verifies signatures on incoming mail (mode `sv`). Postfix sends mail through the OpenDKIM milter on port 10026.
+
+**Enable in `docker compose.yml`**
+
+The `opendkim` service is already present. Set `OPENDKIM: opendkim` in the `postfix` environment (already done in the default `docker compose.yml`):
+
+```yaml
+postfix:
+  environment:
+    OPENDKIM: opendkim    # host[:port], default port 10026
+
+opendkim:
+  environment:
+    DOMAIN:   example.com   # required — your mail domain
+    SELECTOR: mail           # optional, default: mail
+  volumes:
+    - dkim-keys:/etc/opendkim/keys
+```
+
+**First start — get your DNS record**
+
+On first start, OpenDKIM auto-generates a 2048-bit RSA key and prints the DNS record:
+
+```
+==================================================================
+  DKIM key generated — add this DNS TXT record to example.com:
+==================================================================
+mail._domainkey	IN	TXT	( "v=DKIM1; h=sha256; k=rsa; "
+	  "p=MIIBIjAN..." )
+==================================================================
+```
+
+Publish that TXT record in your DNS:
+
+```
+Name:  mail._domainkey.example.com
+Type:  TXT
+Value: v=DKIM1; h=sha256; k=rsa; p=<public-key>
+```
+
+The private key is persisted in the `dkim-keys` volume — back it up and keep it secret.
+
+**Key rotation**
+
+1. Set `SELECTOR` to a new name (e.g. `mail2`) in `docker compose.yml`.
+2. Restart the `opendkim` container — a new key is generated and printed.
+3. Publish the new DNS record alongside the old one.
+4. After the old selector's TTL expires, remove it from DNS.
+5. Remove the old key from the volume if desired.
+
+**Disable DKIM signing in postfix**
+
+Remove or leave empty the `OPENDKIM` environment variable:
+
+```yaml
+postfix:
+  environment:
+    OPENDKIM: ""
+```
+
+---
+
+### DMARC (Domain-based Message Authentication, Reporting and Conformance)
+
+DMARC ties SPF and DKIM together and tells receiving servers what to do when both checks fail. It is DNS-only — no server-side configuration is required in this stack.
+
+**Minimal DNS record**
+
+```
+Name:  _dmarc.example.com
+Type:  TXT
+Value: v=DMARC1; p=none; rua=mailto:dmarc-reports@example.com
+```
+
+Policy values:
+- `p=none` — monitor only, no action taken (good starting point)
+- `p=quarantine` — failing mail goes to spam
+- `p=reject` — failing mail is rejected outright
+
+**With reporting**
+
+- `rua=mailto:…` — aggregate reports (daily summaries)
+- `ruf=mailto:…` — forensic reports (individual failures)
+
+**Recommended roll-out sequence**
+
+1. Start with `p=none; rua=mailto:your-address` and collect reports for a few weeks.
+2. Once you are confident SPF and DKIM are working correctly, move to `p=quarantine`.
+3. Finally switch to `p=reject` for maximum protection.
+
+---
+
 ## Virus Scan (to do)
 
 ## Frontend: SnappyMail Web-Mailer
@@ -72,12 +206,12 @@ Includes: https://github.com/mwaeckerlin/postgrey (now uses milter-greylist)
 
 If you use TLS, configuration parameters are:
  - IMAP: `SSL/TLS` (port: `993`)
- - SMTP: `StartTLS` (port: `578`)
+ - SMTP: `StartTLS` (port: `587`)
  - SIEVE: `StartTLS` (port: `4190`)
 
 ## Local Development
 
-`docker-compose.local.yml` is an overlay for local testing — no root required, outbound mail is intercepted, a webmailer is included.
+`docker compose.local.yml` is an overlay for local testing — no root required, outbound mail is intercepted, a webmailer is included.
 
 ### Start
 
@@ -132,8 +266,8 @@ Inspect outbound mail caught by fake-smtp:
 
 ```bash
 # list captured mails
-docker compose -f docker-compose.yml -f docker-compose.local.yml exec fake-smtp ls /mails
+docker compose -f docker compose.yml -f docker compose.local.yml exec fake-smtp ls /mails
 
 # read a captured mail
-docker compose -f docker-compose.yml -f docker-compose.local.yml exec fake-smtp cat /mails/<filename>
+docker compose -f docker compose.yml -f docker compose.local.yml exec fake-smtp cat /mails/<filename>
 ```
