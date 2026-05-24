@@ -2,6 +2,20 @@
 
 Collection of Docker images for a full mail service: Postfix (SMTP/TLS) + Dovecot (IMAP/POP3/Sieve) + Greylisting + SPF/DKIM/DMARC; built from several submodules.
 
+## Image Dependency Chain
+
+The images are layered — each builds on the previous:
+
+```
+mwaeckerlin/very-base
+  └── mwaeckerlin/smtp-relay        simple open relay (for other apps: Nextcloud, Gitea…)
+        ├── mwaeckerlin/smtp-relay-tls    same, with TLS support
+        └── mwaeckerlin/mailforward       mail forwarder (no own mailbox)
+              └── mwaeckerlin/postfix     full mail server ← core of this stack
+```
+
+`smtp-relay` and `smtp-relay-tls` are also published as standalone images for use by other Docker services that need an SMTP server without the full mailservice stack.
+
 Build the images:
 
     npm run build

@@ -7,6 +7,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **README**: image dependency chain documented (`smtp-relay` → `mailforward` → `postfix`)
+
 - **OpenDKIM service** (`opendkim/`): new container that auto-generates a 2048-bit RSA
   key on first start, signs outgoing mail and verifies incoming signatures (mode `sv`).
   Key is persisted in the `dkim-keys` volume. DNS TXT record is printed to the log on
