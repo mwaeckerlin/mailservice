@@ -1,6 +1,6 @@
 # MailService
 
-Collection of Docker images for full Mailservice: SMTP/TLS + IMAPS + Greylisting (milter-greylist) + SPAM filter; built using several subprojects.
+Collection of Docker images for a full mail service: Postfix (SMTP/TLS) + Dovecot (IMAP/POP3/Sieve) + Greylisting + SPF/DKIM/DMARC; built from several submodules.
 
 Build the images:
 
@@ -30,6 +30,32 @@ If you use TLS, Configuration parameters are:
  - SIEVE: `StartTLS` (port: `4190`)
 
 Access rights for the volumes, if on a local filesystem, must be set to: `100:1000`
+
+## Design Philosophy: Reliability over Filtering
+
+Every message has exactly **two possible outcomes**:
+
+1. **Delivered** — the message arrives in the recipient's **INBOX**.
+2. **Rejected** — the sender receives a **correct, informative SMTP error** (RFC 5321 compliant) explaining why the message was refused.
+
+There is no third outcome. Messages do **not** disappear into a spam folder, are **not** silently dropped, and are **not** quarantined without notification. Either the recipient has the mail, or the sender knows it was refused and why.
+
+This guarantee holds as long as the sender's infrastructure also follows the RFCs (i.e. correctly handles 4xx/5xx responses and does not forge envelope addresses).
+
+### How each component upholds this
+
+| Component | Behaviour on rejection |
+|-----------|----------------------|
+| Postfix restrictions (invalid HELO, unknown domain, relay attempt, RBL hit) | `5xx` permanent rejection — sender informed immediately |
+| Greylisting (milter-greylist) | `4xx` temporary deferral — RFC-compliant, sender retries automatically |
+| SPF hard fail (`-all`) | `550` permanent rejection — sender informed |
+| SPF soft-fail (`~all`), neutral, none | `DUNNO` — mail passes through to INBOX |
+| SPF / DNS temporary error | `4xx` deferral — sender retries |
+| DKIM verification failure | Header added, mail delivered — DKIM failure alone does not reject |
+
+There is deliberately **no spam folder** and **no content-based filtering** that could cause silent misdirection.
+
+---
 
 ## PostfixAdmin
 
