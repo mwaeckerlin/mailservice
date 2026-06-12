@@ -73,3 +73,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - `smtpd_tls_auth_only = no` set explicitly when TLS is not configured, preventing
   Postfix from silently refusing cleartext auth in development setups.
+- **Frontend UI test suite** (`tests/e2e/test_webui.py`): the full PostfixAdmin and
+  SnappyMail end-to-end flow now passes (all 38 e2e tests green). Required fixes:
+  - **PostfixAdmin** (`postfixadmin/`): custom settings moved to `config.local.php`
+    (env-var overrides only) so the Alpine package's `config.inc.php` 4.x defaults —
+    including `$CONF['dkim']` — are preserved; replacing the main config crashed setup
+    with a `Config::bool('dkim')` fatal. Both files are placed under
+    `/root/etc/postfixadmin/` so `COPY --from=build /root/ /` includes the symlink
+    targets. `display_errors`/`display_startup_errors` disabled and `clear_env = no`
+    set in the PHP-FPM pool so PHP warnings no longer corrupt HTML/JSON responses.
+  - **SnappyMail** (`rainloop/Dockerfile.php-fpm`): same PHP-FPM hardening
+    (`display_errors` off, `clear_env = no`); the deprecation warnings were corrupting
+    the admin `AdminAppData` JSON and blocking login. `VOLUME` corrected to `/app/data`.
+  - **`test_webui.py` selectors** updated for PostfixAdmin 4.x (two-step `setup.php`
+    with repeated `setup_password`, `edit.php?table=…`, `value[…]` fields) and the
+    SnappyMail 2.38 SPA (Knockout/Squire): identity-popup dismissal, `emailsTags` To
+    field, Squire body editor, double-fill of the SMTP host to defeat the
+    `smtpHostFocus` auto-fill, and Sent-folder "Do not use" handling on send.
+  - **`docker-compose.yml`** (e2e): SnappyMail admin seeded with `admin_login`/
+    `admin_password`; `SM_ADMIN_USER` exposed to the test runner.

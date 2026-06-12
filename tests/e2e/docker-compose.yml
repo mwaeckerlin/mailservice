@@ -67,12 +67,10 @@ services:
 
   postgrey:
     build: ../../postgrey
-    # Override CMD: 5 s greylist delay; autowhite in greylist.conf enables auto-whitelist
     command: ["-w", "5"]
     volumes:
       - ./greylist.conf:/etc/milter-greylist/greylist.conf:ro
     networks: [greylisting]
-    # Reduce DNS timeout so reverse-PTR failures don't delay every SMTP transaction
     dns_opt:
       - "timeout:1"
       - "attempts:1"
@@ -105,10 +103,76 @@ services:
       - fake-mails:/mails
     networks: [mail]
 
+  postfixadmin-db:
+    image: mariadb:11
+    environment:
+      MYSQL_DATABASE:             postfixadmin
+      MYSQL_USER:                 postfixadmin
+      MYSQL_PASSWORD:             testpass
+      MYSQL_RANDOM_ROOT_PASSWORD: "yes"
+    healthcheck:
+      test: ["CMD", "mariadb-admin", "ping", "-h", "localhost", "-u", "postfixadmin", "-ptestpass"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks: [ui-net]
+
+  postfixadmin:
+    build: ../../postfixadmin
+    environment:
+      DATABASE_TYPE:          mysqli
+      DATABASE_HOST:          postfixadmin-db
+      DATABASE_NAME:          postfixadmin
+      DATABASE_USER:          postfixadmin
+      DATABASE_PASSWORD:      testpass
+      SETUP_PASSWORD:              "$$2y$$12$$MHkqblkyo7WD0q6D3I7y9epJiZO9MqyN4AIYxmtn1NuyikRIvpDUy"
+      EMAILCHECK_RESOLVE_DOMAIN:   "NO"
+      ALIASES:                "10"
+      MAILBOXES:              "10"
+      MAXQUOTA:               "10"
+      DOMAIN_QUOTA_DEFAULT:   "2048"
+    depends_on:
+      postfixadmin-db:
+        condition: service_healthy
+    networks: [ui-net]
+
+  postfixadmin-proxy:
+    build: ../../postfixadmin-proxy
+    depends_on: [postfixadmin]
+    networks: [ui-net]
+
+  snappymail-init:
+    image: mwaeckerlin/very-base
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - "mkdir -p /data/_data_/_default_/configs && printf '[security]\\nadmin_password = \"$$2y$$12$$wbso8NPeetgyrrwa5yKLBup0N011YwzKfyOYb0TCtsv/jX2q58nJi\"\\nadmin_login = \"admin\"\\n' > /data/_data_/_default_/configs/application.ini && chown -R 100 /data"
+    volumes:
+      - snappymail-data:/data
+    networks: []
+
+  snappymail:
+    build:
+      context: ../../rainloop
+      dockerfile: Dockerfile.php-fpm
+      target: php-fpm
+    depends_on:
+      snappymail-init:
+        condition: service_completed_successfully
+    volumes:
+      - snappymail-data:/app/data
+    networks: [ui-net, mail]
+
+  snappymail-proxy:
+    build:
+      context: ../../rainloop
+      dockerfile: Dockerfile.nginx
+    depends_on: [snappymail]
+    networks: [ui-net]
+
   test-runner:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.playwright
     depends_on:
       postfix:
         condition: service_started
@@ -116,21 +180,32 @@ services:
         condition: service_started
       postgrey:
         condition: service_healthy
+      postfixadmin-proxy:
+        condition: service_started
+      snappymail-proxy:
+        condition: service_started
     environment:
-      POSTFIX_HOST:   postfix
-      DOVECOT_HOST:   dovecot
-      OPENDKIM_HOST:  opendkim
-      SMTP_PORT:      "25"
-      IMAP_PORT:      "143"
-      POP3_PORT:      "110"
-      SIEVE_PORT:     "4190"
-      OPENDKIM_PORT:  "10026"
-      MAIL_DOMAIN:    test.local
-      ALICE_USER:     alice@test.local
-      ALICE_PASS:     alicepass
-      BOB_USER:       bob@test.local
-      BOB_PASS:       bobpass
-    networks: [mail]
+      POSTFIX_HOST:       postfix
+      DOVECOT_HOST:       dovecot
+      OPENDKIM_HOST:      opendkim
+      SMTP_PORT:          "25"
+      IMAP_PORT:          "143"
+      POP3_PORT:          "110"
+      SIEVE_PORT:         "4190"
+      OPENDKIM_PORT:      "10026"
+      MAIL_DOMAIN:        test.local
+      ALICE_USER:         alice@test.local
+      ALICE_PASS:         alicepass
+      BOB_USER:           bob@test.local
+      BOB_PASS:           bobpass
+      POSTFIXADMIN_URL:   "http://postfixadmin-proxy:8080"
+      SNAPPYMAIL_URL:     "http://snappymail-proxy:8080"
+      ADMIN_USER:         admin@test.local
+      ADMIN_PASS:         Admin123pass
+      SETUP_PASS:         test123
+      SM_ADMIN_USER:      "admin"
+      SM_ADMIN_PASS:      "12345"
+    networks: [mail, ui-net]
     command: ["pytest", "-v", "--tb=short"]
 
 networks:
@@ -142,7 +217,9 @@ networks:
     ipam:
       config:
         - subnet: 10.100.0.0/24
+  ui-net:
 
 volumes:
   fake-mails:
   dkim-keys:
+  snappymail-data:

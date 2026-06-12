@@ -32,6 +32,7 @@ ADMIN_EMAIL = os.environ.get("ADMIN_USER",       "admin@test.local")
 ADMIN_PW    = os.environ.get("ADMIN_PASS",       "Admin123pass")
 SETUP_PW    = os.environ.get("SETUP_PASS",       "test123")
 SM_ADMIN_PW = os.environ.get("SM_ADMIN_PASS",    "12345")
+SM_ADMIN_USER = os.environ.get("SM_ADMIN_USER",  "admin")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -80,11 +81,19 @@ def pa_admin_ready(browser: Browser):
     """Create PostfixAdmin superadmin via setup.php (once per session)."""
     page = browser.new_page()
     page.goto(f"{PA_URL}/public/setup.php", timeout=30_000)
-    page.locator("[name=setup_password]").fill(SETUP_PW)
-    page.locator("[name=username]").fill(ADMIN_EMAIL)
-    page.locator("[name=password]").fill(ADMIN_PW)
-    page.locator("[name=password2]").fill(ADMIN_PW)
-    page.locator("input[type=submit]").click()
+
+    # Step 1: Authenticate with setup_password (PostfixAdmin 4.x two-step setup)
+    page.locator("form[name=authenticate] [name=setup_password]").fill(SETUP_PW)
+    page.locator("form[name=authenticate] button[type=submit]").click()
+    page.wait_for_load_state("networkidle", timeout=15_000)
+
+    # Step 2: Create superadmin (form only appears after successful authentication)
+    # setup_password must be submitted again — PostfixAdmin re-authenticates per request
+    page.locator("form[name=create_admin] [name=setup_password]").fill(SETUP_PW)
+    page.locator("form[name=create_admin] [name=username]").fill(ADMIN_EMAIL)
+    page.locator("form[name=create_admin] [name=password]").fill(ADMIN_PW)
+    page.locator("form[name=create_admin] [name=password2]").fill(ADMIN_PW)
+    page.locator("form[name=create_admin] [type=submit]").click()
     page.wait_for_load_state("networkidle", timeout=15_000)
     page.close()
 
@@ -96,37 +105,40 @@ def sm_domain_ready(browser: Browser):
     page.goto(f"{SM_URL}/?admin", timeout=30_000)
     page.wait_for_load_state("networkidle", timeout=20_000)
 
-    # Admin login form
+    # Admin login form — Login field has required attribute, must be filled
+    page.locator("input[name='Login']").fill(SM_ADMIN_USER)
     page.locator("input[type=password]").fill(SM_ADMIN_PW)
-    page.locator("button[type=submit]").click()
+    page.locator("button.buttonLogin").click()
     page.wait_for_load_state("networkidle", timeout=15_000)
 
-    # Navigate to Domains tab
-    page.get_by_text("Domains", exact=False).first.click()
+    # Navigate to Domains tab via href (more reliable than text lookup)
+    page.locator("a[href='#/domains']").click()
     page.wait_for_load_state("networkidle", timeout=10_000)
 
-    # Add domain — click the + / Add button
-    add_btn = page.locator("button").filter(has_text="+").or_(
-        page.get_by_role("button", name="Add domain")
-    ).first
-    add_btn.click()
+    # Add Domain is an <a> element (not a button)
+    page.locator("a[data-bind*='createDomain']").first.click()
     page.wait_for_timeout(500)
 
-    # Domain name
-    page.get_by_label("Domain", exact=False).first.fill(DOMAIN)
+    # Fill IMAP/SMTP hosts BEFORE the domain Name to avoid the imapHostFocus
+    # auto-fill (which sets the host to the domain name when host is empty)
+    page.locator("input[name='IMAP[host]']").fill(DOVECOT)
+    page.locator("input[name='IMAP[port]']").fill("143")
 
-    # IMAP settings
-    page.locator("input[id*='imap'][id*='host'], input[name*='IMAP'][name*='Host'], "
-                 "input[placeholder*='imap' i]").first.fill(DOVECOT)
-    page.locator("input[id*='imap'][id*='port'], input[name*='IMAP'][name*='Port']").first.fill("143")
+    # Switch to SMTP tab, then fill SMTP settings. Focusing the *empty* SMTP host
+    # triggers SnappyMail's smtpHostFocus binding, which mirrors the IMAP host
+    # into it (imap→smtp). A single fill then races and yields "dovecotpostfix".
+    # Fill once to make it non-empty (disabling the auto-fill), then set it again.
+    page.locator("label[for='tab-smtp']").click()
+    smtp_host = page.locator("input[name='SMTP[host]']")
+    smtp_host.fill("postfix")
+    smtp_host.fill("postfix")
+    page.locator("input[name='SMTP[port]']").fill("25")
 
-    # SMTP settings
-    page.locator("input[id*='smtp'][id*='host'], input[name*='SMTP'][name*='Host'], "
-                 "input[placeholder*='smtp' i]").first.fill("postfix")
-    page.locator("input[id*='smtp'][id*='port'], input[name*='SMTP'][name*='Port']").first.fill("25")
+    # Fill domain Name last — hosts are already set so auto-fill won't overwrite
+    page.locator("input[name='Name']").fill(DOMAIN)
 
-    # Save
-    page.get_by_role("button", name="Save").click()
+    # Save is also an <a> element (not a button)
+    page.locator("footer a[data-bind*='createOrAddCommand']").click()
     page.wait_for_load_state("networkidle", timeout=10_000)
     page.close()
 
@@ -139,7 +151,7 @@ def test_postfixadmin_setup_creates_admin(browser: Browser, pa_admin_ready):
     page.goto(f"{PA_URL}/public/login.php", timeout=20_000)
     page.locator("[name=fUsername]").fill(ADMIN_EMAIL)
     page.locator("[name=fPassword]").fill(ADMIN_PW)
-    page.locator("input[type=submit]").click()
+    page.locator("[type=submit]").click()
     page.wait_for_load_state("networkidle", timeout=15_000)
     # Successful login: URL changes away from login.php
     assert "login" not in page.url, f"Login failed, still at {page.url}"
@@ -153,15 +165,15 @@ def test_postfixadmin_create_domain(browser: Browser, pa_admin_ready):
     page.goto(f"{PA_URL}/public/login.php", timeout=20_000)
     page.locator("[name=fUsername]").fill(ADMIN_EMAIL)
     page.locator("[name=fPassword]").fill(ADMIN_PW)
-    page.locator("input[type=submit]").click()
+    page.locator("[type=submit]").click()
     page.wait_for_load_state("networkidle", timeout=15_000)
 
     # Navigate to Create Domain
-    page.goto(f"{PA_URL}/public/create-domain.php", timeout=15_000)
-    page.locator("[name=fDomain]").fill("ui.local")
-    page.locator("input[type=submit]").first.click()
+    page.goto(f"{PA_URL}/public/edit.php?table=domain", timeout=15_000)
+    page.locator("[name='value[domain]']").fill("ui.local")
+    page.locator("[type=submit]").first.click()
     page.wait_for_load_state("networkidle", timeout=10_000)
-    # Should redirect to list-domain.php or show success
+    # Should redirect to list or show success
     assert "error" not in page.content().lower() or "ui.local" in page.content(), \
         "Domain creation may have failed"
     page.close()
@@ -174,24 +186,24 @@ def test_postfixadmin_create_mailbox(browser: Browser, pa_admin_ready):
     page.goto(f"{PA_URL}/public/login.php", timeout=20_000)
     page.locator("[name=fUsername]").fill(ADMIN_EMAIL)
     page.locator("[name=fPassword]").fill(ADMIN_PW)
-    page.locator("input[type=submit]").click()
+    page.locator("[type=submit]").click()
     page.wait_for_load_state("networkidle", timeout=15_000)
 
     # Need to have a domain first — ensure ui.local exists by trying to create it (ignore errors)
-    page.goto(f"{PA_URL}/public/create-domain.php", timeout=15_000)
-    page.locator("[name=fDomain]").fill("ui.local")
-    page.locator("input[type=submit]").first.click()
+    page.goto(f"{PA_URL}/public/edit.php?table=domain", timeout=15_000)
+    page.locator("[name='value[domain]']").fill("ui.local")
+    page.locator("[type=submit]").first.click()
     page.wait_for_load_state("networkidle", timeout=10_000)
 
     # Create mailbox
-    page.goto(f"{PA_URL}/public/create-mailbox.php", timeout=15_000)
-    page.locator("[name=fUsername]").fill("webtest")
+    page.goto(f"{PA_URL}/public/edit.php?table=mailbox", timeout=15_000)
+    page.locator("[name='value[local_part]']").fill("webtest")
     # Select domain ui.local in the dropdown
-    page.locator("select[name=fDomain]").select_option("ui.local")
-    page.locator("[name=fName]").fill("Web Test")
-    page.locator("[name=fPassword]").fill("WebTest12")
-    page.locator("[name=fPassword2]").fill("WebTest12")
-    page.locator("input[type=submit]").first.click()
+    page.locator("select[name='value[domain]']").select_option("ui.local")
+    page.locator("[name='value[name]']").fill("Web Test")
+    page.locator("[name='value[password]']").fill("WebTest12")
+    page.locator("[name='value[password2]']").fill("WebTest12")
+    page.locator("[type=submit]").first.click()
     page.wait_for_load_state("networkidle", timeout=10_000)
     assert "error" not in page.content().lower() or "webtest" in page.content(), \
         "Mailbox creation may have failed"
@@ -205,10 +217,11 @@ def test_snappymail_admin_configures_domain(browser: Browser, sm_domain_ready):
     page = browser.new_page()
     page.goto(f"{SM_URL}/?admin", timeout=30_000)
     page.wait_for_load_state("networkidle", timeout=20_000)
+    page.locator("input[name='Login']").fill(SM_ADMIN_USER)
     page.locator("input[type=password]").fill(SM_ADMIN_PW)
-    page.locator("button[type=submit]").click()
+    page.locator("button.buttonLogin").click()
     page.wait_for_load_state("networkidle", timeout=15_000)
-    page.get_by_text("Domains", exact=False).first.click()
+    page.locator("a[href='#/domains']").click()
     page.wait_for_load_state("networkidle", timeout=10_000)
     expect(page.get_by_text(DOMAIN, exact=False)).to_be_visible(timeout=10_000)
     page.close()
@@ -283,39 +296,71 @@ def test_snappymail_send_mail(browser: Browser, sm_domain_ready):
     page.get_by_role("button", name="Sign in").click()
     page.wait_for_load_state("networkidle", timeout=20_000)
 
-    # Open compose window — click New Mail / Compose button
-    compose_btn = page.get_by_role("button", name="New message").or_(
-        page.get_by_role("button", name="Compose")
-    ).or_(
-        page.locator("a[title*='Compose' i], button[title*='Compose' i], "
-                     "a[title*='New' i], button[title*='New' i]")
-    ).first
-    compose_btn.click()
-    page.wait_for_timeout(1000)
+    # SnappyMail opens an "Edit Identity" popup ~1s after login when the account
+    # has no saved identity yet — it overlays and blocks the compose window.
+    # Save a name to dismiss it permanently (known SnappyMail behaviour).
+    identity_dialog = page.locator("dialog#V-PopupsIdentity")
+    try:
+        identity_dialog.wait_for(state="visible", timeout=8_000)
+        identity_dialog.locator("input[name='Name']").fill("Alice")
+        identity_dialog.locator("button.buttonAddIdentity").click()
+        identity_dialog.wait_for(state="hidden", timeout=8_000)
+    except Exception:
+        pass
 
-    # Fill compose form
-    page.get_by_placeholder("To", exact=False).or_(
-        page.locator("[name=To], [data-name=To]")
-    ).first.fill(BOB)
-    page.keyboard.press("Tab")
+    # Open compose window — the compose button is <a class="buttonCompose">
+    page.locator("a.buttonCompose").first.click()
+    page.wait_for_timeout(1_000)
 
-    page.get_by_placeholder("Subject", exact=False).or_(
-        page.locator("[name=Subject], [data-name=Subject]")
-    ).first.fill(subject)
+    # Fill compose form — emailsTags binding replaces the original input with
+    # <ul class="emailaddresses"><input></ul>; first ul = To field. The address
+    # must be committed as a tag (Enter) or the Send command stays disabled.
+    to_input = page.locator("ul.emailaddresses input").first
+    to_input.click()
+    to_input.type(BOB)
+    to_input.press("Enter")
 
-    # Body — click on compose area and type
-    body_area = page.locator(
-        ".ck-editor__editable, .compose-body, [contenteditable='true']"
-    ).first
-    body_area.click()
-    body_area.type("Hello Bob, this is a UI test mail.")
+    # Subject field has name="subject"
+    page.locator("input[name='subject']").fill(subject)
 
-    # Send
-    page.get_by_role("button", name="Send").click()
-    page.wait_for_load_state("networkidle", timeout=15_000)
+    # Body is a Squire WYSIWYG contenteditable div inside .textAreaParent. It can
+    # report as "not visible" to Playwright (zero-size flex child until laid out),
+    # so focus it via JS and send real keystrokes that Squire's handler registers.
+    body_area = page.locator(".textAreaParent > .squire-wysiwyg")
+    body_area.wait_for(state="attached", timeout=10_000)
+    body_area.evaluate("el => el.focus()")
+    page.keyboard.type("Hello Bob, this is a UI test mail.")
+
+    # Send button is <a data-bind="command: sendCommand">
+    page.locator("a[data-bind*='sendCommand']").first.click()
+
+    # Alice's mailbox has only INBOX (no Sent folder), so on the first send
+    # SnappyMail opens a system-folder picker instead of sending. Set the Sent
+    # folder to "Do not use" (__UNUSE__) — sentFolder() then returns null and
+    # the resend proceeds without trying to save a copy. The mail still goes out.
+    folder_picker = page.locator("dialog#V-PopupsFolderSystem")
+    try:
+        folder_picker.wait_for(state="visible", timeout=5_000)
+        folder_picker.locator("select").first.select_option("__UNUSE__")
+        page.wait_for_timeout(500)
+        folder_picker.locator("a.close").click()
+        folder_picker.wait_for(state="hidden", timeout=5_000)
+        page.locator("a[data-bind*='sendCommand']").first.click()
+    except Exception:
+        pass
+
+    # Wait for the compose dialog to close — that confirms SendMessage completed.
+    # (Don't rely on networkidle: it can read as idle in the gap before the send
+    # request fires, and closing the page would then abort the in-flight send.)
+    page.locator("dialog#V-PopupsCompose").wait_for(state="hidden", timeout=15_000)
     page.close()
 
-    # Verify bob received it via IMAP
-    time.sleep(5)
-    messages = _imap_messages(BOB, BOB_PW, subject)
+    # Verify bob received it via IMAP — poll to allow for delivery latency
+    messages = []
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        messages = _imap_messages(BOB, BOB_PW, subject)
+        if messages:
+            break
+        time.sleep(2)
     assert messages, f"Bob did not receive mail with subject '{subject}'"

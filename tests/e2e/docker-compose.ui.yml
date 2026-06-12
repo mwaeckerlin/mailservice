@@ -51,7 +51,7 @@ services:
       dockerfile: Dockerfile.php-fpm
       target: php-fpm
     volumes:
-      - snappymail-data:/app/snappymail/data
+      - snappymail-data:/app/data
     networks: [ui-net, mail]
 
   snappymail-proxy:
