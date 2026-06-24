@@ -11,6 +11,8 @@
     "stop": "docker compose down",
     "test": "npm run test:e2e",
     "test:e2e": "bash tests/run-e2e.sh",
-    "test:ui": "bash tests/run-ui.sh"
+    "test:ui": "bash tests/run-ui.sh",
+    "test:manual": "bash tests/run-manual.sh",
+    "test:manual:stop": "docker compose -f tests/e2e/docker-compose.yml -f tests/e2e/docker-compose.manual.yml down --remove-orphans"
   }
 }

@@ -1,7 +1,7 @@
 """SMTP delivery and rejection tests."""
 import smtplib
 import pytest
-from conftest import POSTFIX, SMTP_P, ALICE, BOB, SENDER, DOMAIN, build_message
+from conftest import POSTFIX, SMTP_P, ALICE, ALICE_PW, BOB, SENDER, DOMAIN, build_message
 
 
 def test_smtp_delivery_to_local_user(unique_subject):
@@ -42,7 +42,7 @@ def test_smtp_sasl_auth_accepted(unique_subject):
     subject = unique_subject + "-auth"
     with smtplib.SMTP(POSTFIX, SMTP_P) as s:
         s.ehlo(f"testhost.{DOMAIN}")
-        s.login(ALICE, "alicepass")
+        s.login(ALICE, ALICE_PW)
         result = s.sendmail(ALICE, [BOB], build_message(subject, from_=ALICE, to=BOB))
     assert result == {}
 

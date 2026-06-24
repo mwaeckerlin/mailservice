@@ -35,7 +35,7 @@ services:
       DOMAIN:         test.local
       HOSTNAME:       mail.test.local
       HOSTROOT:       test.local
-      DB_HOST:        db
+      DB_HOST:        postfixadmin-db
       DB_USER:        postfixadmin
       DB_PASSWORD:    testpass
       DB_NAME:        postfixadmin
@@ -43,7 +43,7 @@ services:
       MYNETWORKS:     "127.0.0.0/8"
     dns: ["10.100.0.2"]
     depends_on:
-      db:
+      postfixadmin-db:
         condition: service_healthy
       opendkim:
         condition: service_healthy
@@ -54,14 +54,15 @@ services:
   dovecot:
     build: ../../dovecot
     environment:
-      DB_HOST:              db
+      DB_HOST:              postfixadmin-db
       DB_USER:              postfixadmin
       DB_PASSWORD:          testpass
       DB_NAME:              postfixadmin
       DOMAIN:               test.local
-      DEFAULT_PASS_SCHEME:  PLAIN
+      # no DEFAULT_PASS_SCHEME → dovecot default SHA512-CRYPT, matching
+      # PostfixAdmin's php_crypt ($6$…) hashes stored in the shared database
     depends_on:
-      db:
+      postfixadmin-db:
         condition: service_healthy
     networks: [mail, db-net]
 
@@ -81,28 +82,14 @@ services:
       retries: 15
       start_period: 3s
 
-  db:
-    image: mariadb:11
-    environment:
-      MYSQL_DATABASE:             postfixadmin
-      MYSQL_USER:                 postfixadmin
-      MYSQL_PASSWORD:             testpass
-      MYSQL_RANDOM_ROOT_PASSWORD: "yes"
-    volumes:
-      - ./init/db.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
-    healthcheck:
-      test: ["CMD", "mariadb-admin", "ping", "-h", "localhost", "-u", "postfixadmin", "-ptestpass"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-    networks: [db-net]
-
   fake-smtp:
     build: ../../../fake-smtp
     volumes:
       - fake-mails:/mails
     networks: [mail]
 
+  # Single shared database for PostfixAdmin, Postfix and Dovecot (mirrors the
+  # production stack). Accounts are created through PostfixAdmin, not pre-seeded.
   postfixadmin-db:
     image: mariadb:11
     environment:
@@ -115,7 +102,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 12
-    networks: [ui-net]
+    networks: [ui-net, db-net]
 
   postfixadmin:
     build: ../../postfixadmin
@@ -195,9 +182,9 @@ services:
       OPENDKIM_PORT:      "10026"
       MAIL_DOMAIN:        test.local
       ALICE_USER:         alice@test.local
-      ALICE_PASS:         alicepass
+      ALICE_PASS:         alicepass12
       BOB_USER:           bob@test.local
-      BOB_PASS:           bobpass
+      BOB_PASS:           bobpass12
       POSTFIXADMIN_URL:   "http://postfixadmin-proxy:8080"
       SNAPPYMAIL_URL:     "http://snappymail-proxy:8080"
       ADMIN_USER:         admin@test.local

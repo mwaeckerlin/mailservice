@@ -24,9 +24,9 @@ SM_URL      = os.environ.get("SNAPPYMAIL_URL",   "http://snappymail-proxy:8080")
 DOVECOT     = os.environ.get("DOVECOT_HOST",     "dovecot")
 IMAP_P      = int(os.environ.get("IMAP_PORT",    "143"))
 ALICE       = os.environ.get("ALICE_USER",       "alice@test.local")
-ALICE_PW    = os.environ.get("ALICE_PASS",       "alicepass")
+ALICE_PW    = os.environ.get("ALICE_PASS",       "alicepass12")
 BOB         = os.environ.get("BOB_USER",         "bob@test.local")
-BOB_PW      = os.environ.get("BOB_PASS",         "bobpass")
+BOB_PW      = os.environ.get("BOB_PASS",         "bobpass12")
 DOMAIN      = os.environ.get("MAIL_DOMAIN",      "test.local")
 ADMIN_EMAIL = os.environ.get("ADMIN_USER",       "admin@test.local")
 ADMIN_PW    = os.environ.get("ADMIN_PASS",       "Admin123pass")
@@ -67,35 +67,8 @@ def _imap_messages(user: str, password: str, subject_substr: str) -> list[str]:
 
 @pytest.fixture(scope="session", autouse=True)
 def wait_for_ui_services():
-    _wait_http(f"{PA_URL}/public/setup.php")
+    _wait_http(f"{PA_URL}/setup.php")
     _wait_http(f"{SM_URL}/")
-
-
-@pytest.fixture(scope="session")
-def browser_type_launch_args(browser_type_launch_args):
-    return {**browser_type_launch_args, "args": ["--no-sandbox", "--disable-setuid-sandbox"]}
-
-
-@pytest.fixture(scope="session")
-def pa_admin_ready(browser: Browser):
-    """Create PostfixAdmin superadmin via setup.php (once per session)."""
-    page = browser.new_page()
-    page.goto(f"{PA_URL}/public/setup.php", timeout=30_000)
-
-    # Step 1: Authenticate with setup_password (PostfixAdmin 4.x two-step setup)
-    page.locator("form[name=authenticate] [name=setup_password]").fill(SETUP_PW)
-    page.locator("form[name=authenticate] button[type=submit]").click()
-    page.wait_for_load_state("networkidle", timeout=15_000)
-
-    # Step 2: Create superadmin (form only appears after successful authentication)
-    # setup_password must be submitted again — PostfixAdmin re-authenticates per request
-    page.locator("form[name=create_admin] [name=setup_password]").fill(SETUP_PW)
-    page.locator("form[name=create_admin] [name=username]").fill(ADMIN_EMAIL)
-    page.locator("form[name=create_admin] [name=password]").fill(ADMIN_PW)
-    page.locator("form[name=create_admin] [name=password2]").fill(ADMIN_PW)
-    page.locator("form[name=create_admin] [type=submit]").click()
-    page.wait_for_load_state("networkidle", timeout=15_000)
-    page.close()
 
 
 @pytest.fixture(scope="session")
@@ -145,61 +118,51 @@ def sm_domain_ready(browser: Browser):
 
 # ── PostfixAdmin tests ────────────────────────────────────────────────────────
 
-def test_postfixadmin_setup_creates_admin(browser: Browser, pa_admin_ready):
-    """After setup.php, admin can log in to PostfixAdmin."""
-    page = browser.new_page()
-    page.goto(f"{PA_URL}/public/login.php", timeout=20_000)
+def _pa_login(page):
+    """Log in to PostfixAdmin as the superadmin."""
+    page.goto(f"{PA_URL}/login.php", timeout=20_000)
     page.locator("[name=fUsername]").fill(ADMIN_EMAIL)
     page.locator("[name=fPassword]").fill(ADMIN_PW)
     page.locator("[type=submit]").click()
     page.wait_for_load_state("networkidle", timeout=15_000)
+
+
+def test_postfixadmin_setup_creates_admin(browser: Browser, provision_mail_accounts):
+    """After setup.php, the admin can log in to PostfixAdmin."""
+    page = browser.new_page()
+    _pa_login(page)
     # Successful login: URL changes away from login.php
     assert "login" not in page.url, f"Login failed, still at {page.url}"
     page.close()
 
 
-def test_postfixadmin_create_domain(browser: Browser, pa_admin_ready):
-    """Admin can add a new domain in PostfixAdmin."""
-    page = browser.new_page()
-    # Login
-    page.goto(f"{PA_URL}/public/login.php", timeout=20_000)
-    page.locator("[name=fUsername]").fill(ADMIN_EMAIL)
-    page.locator("[name=fPassword]").fill(ADMIN_PW)
-    page.locator("[type=submit]").click()
-    page.wait_for_load_state("networkidle", timeout=15_000)
+def test_postfixadmin_mail_users_created(browser: Browser, provision_mail_accounts):
+    """The mail users provisioned through PostfixAdmin are listed for the domain.
 
-    # Navigate to Create Domain
-    page.goto(f"{PA_URL}/public/edit.php?table=domain", timeout=15_000)
-    page.locator("[name='value[domain]']").fill("ui.local")
-    page.locator("[type=submit]").first.click()
+    This is the account-provisioning test the rest of the suite relies on: the
+    alice/bob mailboxes are created via the PostfixAdmin UI (in the
+    `provision_mail_accounts` fixture) into the single shared database that
+    Postfix and Dovecot also use.
+    """
+    page = browser.new_page()
+    _pa_login(page)
+    page.goto(f"{PA_URL}/list-virtual.php?domain={DOMAIN}", timeout=15_000)
     page.wait_for_load_state("networkidle", timeout=10_000)
-    # Should redirect to list or show success
-    assert "error" not in page.content().lower() or "ui.local" in page.content(), \
-        "Domain creation may have failed"
+    content = page.content()
+    assert ALICE in content, f"{ALICE} not listed in PostfixAdmin for {DOMAIN}"
+    assert BOB in content, f"{BOB} not listed in PostfixAdmin for {DOMAIN}"
     page.close()
 
 
-def test_postfixadmin_create_mailbox(browser: Browser, pa_admin_ready):
-    """Admin can add a mailbox in PostfixAdmin."""
+def test_postfixadmin_create_mailbox(browser: Browser, provision_mail_accounts):
+    """Admin can add a further mailbox through the PostfixAdmin UI."""
     page = browser.new_page()
-    # Login
-    page.goto(f"{PA_URL}/public/login.php", timeout=20_000)
-    page.locator("[name=fUsername]").fill(ADMIN_EMAIL)
-    page.locator("[name=fPassword]").fill(ADMIN_PW)
-    page.locator("[type=submit]").click()
-    page.wait_for_load_state("networkidle", timeout=15_000)
+    _pa_login(page)
 
-    # Need to have a domain first — ensure ui.local exists by trying to create it (ignore errors)
-    page.goto(f"{PA_URL}/public/edit.php?table=domain", timeout=15_000)
-    page.locator("[name='value[domain]']").fill("ui.local")
-    page.locator("[type=submit]").first.click()
-    page.wait_for_load_state("networkidle", timeout=10_000)
-
-    # Create mailbox
-    page.goto(f"{PA_URL}/public/edit.php?table=mailbox", timeout=15_000)
+    # Create an additional throwaway mailbox in the existing mail domain
+    page.goto(f"{PA_URL}/edit.php?table=mailbox", timeout=15_000)
     page.locator("[name='value[local_part]']").fill("webtest")
-    # Select domain ui.local in the dropdown
-    page.locator("select[name='value[domain]']").select_option("ui.local")
+    page.locator("select[name='value[domain]']").select_option(DOMAIN)
     page.locator("[name='value[name]']").fill("Web Test")
     page.locator("[name='value[password]']").fill("WebTest12")
     page.locator("[name='value[password2]']").fill("WebTest12")

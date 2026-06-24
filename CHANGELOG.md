@@ -49,9 +49,35 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     SnappyMail domain config, user login, mail reading, and mail sending end-to-end.
   - `run-ui.sh`: starts the full UI test stack and runs Playwright tests.
   - `package.json`: new `test:ui` script (`bash tests/run-ui.sh`).
+- **Manual test stack** for exercising the isolated e2e stack by hand in a browser:
+  - `tests/e2e/docker-compose.manual.yml`: overlay that publishes the web UIs and
+    mail ports (SnappyMail, PostfixAdmin, SMTP, IMAP, POP3) on fixed but uncommon
+    host ports (`478xx`, low collision probability) — same isolated `test.local`
+    stack, no internet mail.
+  - `tests/run-manual.sh`: brings the stack up (without the automated test-runner),
+    left running, primes the PostfixAdmin schema (so pages no longer return HTTP 500
+    before setup), and prints the access URLs plus the pre-seeded `alice`/`bob`
+    credentials.
+  - `package.json`: new `test:manual` / `test:manual:stop` scripts.
+  - `README.md`: «Manual Testing in the Isolated Test Stack» section with the
+    isolation guarantee, credentials, and a send/receive walk-through.
 
 ### Changed
 
+- **e2e test stack uses a single shared database** (mirrors production): Postfix,
+  Dovecot and PostfixAdmin now all use `postfixadmin-db`; the separate mail `db`
+  service and the `tests/e2e/init/db.sql` pre-seed were removed. Accounts are no
+  longer pre-seeded — the `provision_mail_accounts` fixture creates the domain and
+  the `alice`/`bob` mailboxes through PostfixAdmin (the schema for Postfix/Dovecot
+  is created by PostfixAdmin's setup), and a dedicated test verifies them. Dovecot
+  uses its default `SHA512-CRYPT` scheme, matching PostfixAdmin's `php_crypt`
+  hashes; test passwords now satisfy PostfixAdmin's policy (`alicepass12` /
+  `bobpass12`). The manual stack inherits this: accounts created in PostfixAdmin
+  are the ones the webmail uses.
+- **README** restructured to the standard «Template A» layout (Purpose → Why →
+  Features → Usage → Administration → Development → Internals). The opening now
+  pitches the project and names the **webmail**; end-user mail-client settings,
+  operator tasks and developer/testing topics are separated into clear sections.
 - **postfix `start.sh`**: ported from bash to POSIX sh; greylisting code refactored
   into the reusable `_add_milter()` function.
 - **postfix `Dockerfile`**: `RUN` commands split to one per line; added
@@ -82,6 +108,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     `/root/etc/postfixadmin/` so `COPY --from=build /root/ /` includes the symlink
     targets. `display_errors`/`display_startup_errors` disabled and `clear_env = no`
     set in the PHP-FPM pool so PHP warnings no longer corrupt HTML/JSON responses.
+  - **PostfixAdmin proxy** (`postfixadmin-proxy/`): nginx `ROOT` kept at the app's
+    `public/` directory (PostfixAdmin's required layout). The web UI is reached at
+    `/setup.php`, `/login.php`, … (no `/public/` prefix) and the bare root no longer
+    shows the «directory layout changed» notice. URLs updated accordingly in the
+    tests and README.
   - **SnappyMail** (`rainloop/Dockerfile.php-fpm`): same PHP-FPM hardening
     (`display_errors` off, `clear_env = no`); the deprecation warnings were corrupting
     the admin `AdminAppData` JSON and blocking login. `VOLUME` corrected to `/app/data`.

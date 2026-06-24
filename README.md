@@ -1,20 +1,59 @@
 # MailService
 
-Collection of Docker images for a full mail service: Postfix (SMTP/TLS) + Dovecot (IMAP/POP3/Sieve) + Greylisting + SPF/DKIM/DMARC; built from several submodules.
+Run your own complete email service for your domain within a Docker stack:
+a full mail server with **webmail**, an **admin web UI**, and modern
+deliverability and anti-abuse (SPF, DKIM, DMARC, greylisting) — everything
+needed to send, receive and read mail under your own domain, without handing
+your correspondence to a third-party mail provider.
 
-## Image Dependency Chain
+## Why MailService
 
-The images are layered — each builds on the previous:
+- **A complete suite, not just an MTA.** Postfix (SMTP/TLS), Dovecot
+  (IMAP/POP3/Sieve), the **SnappyMail** webmail, the **PostfixAdmin** admin UI,
+  OpenDKIM, SPF and greylisting — wired together and ready to run.
+- **Reliability over filtering.** Every message is either delivered to the
+  recipient's INBOX or rejected with a clear, RFC-compliant SMTP error. No spam
+  folder, no silent drops — mail never vanishes into a black hole (see
+  [Design philosophy](#design-philosophy-reliability-over-filtering)).
+- **Accepted by the big providers.** SPF, DKIM and DMARC work out of the box, so
+  your outgoing mail passes authentication at the receiving side.
+- **Composable and reusable.** Built from small, independent images (e.g.
+  `smtp-relay` for other apps such as Nextcloud or Gitea) — run only what you need.
+- **Self-hosted and private.** Runs on your own Docker host. An isolated test
+  stack lets you try the whole thing fully offline before you go live.
 
-```
-mwaeckerlin/very-base
-  └── mwaeckerlin/smtp-relay        simple open relay (for other apps: Nextcloud, Gitea…)
-        ├── mwaeckerlin/smtp-relay-tls    same, with TLS support
-        └── mwaeckerlin/mailforward       mail forwarder (no own mailbox)
-              └── mwaeckerlin/postfix     full mail server ← core of this stack
-```
+## Features
 
-`smtp-relay` and `smtp-relay-tls` are also published as standalone images for use by other Docker services that need an SMTP server without the full mailservice stack.
+- Webmail for end users (**SnappyMail**)
+- Admin web UI to manage domains, mailboxes and aliases (**PostfixAdmin**)
+- SMTP send and receive, with TLS and authenticated submission
+- IMAP and POP3 retrieval, with TLS
+- Server-side mail filters via Sieve (ManageSieve)
+- Greylisting (milter-greylist) to cut spam
+- Incoming SPF check, DKIM signing and verification, DMARC support
+- Reliable delivery guarantee: deliver to INBOX, or reject with an informative error
+- Fully isolated local test stack — no mail ever leaves the machine
+
+## Usage
+
+End users access their mail through the webmail or any standard mail client.
+
+**Webmail:** open the SnappyMail address provided by your administrator and log
+in with your full email address and password.
+
+**Mail client** — recommended (TLS) settings:
+
+| Protocol | Security | Port |
+|----------|----------|------|
+| IMAP | SSL/TLS | 993 |
+| SMTP (submission) | StartTLS | 587 |
+| Sieve | StartTLS | 4190 |
+
+Without TLS the plain ports are IMAP `143`, SMTP `25`, POP3 `110`.
+
+## Administration
+
+### Build and run
 
 Build the images:
 
@@ -32,58 +71,35 @@ Wait until the database is initialized and outputs:
 
 > postfixadmin-db_1 | 2021-06-10T19:41:31.466095Z 0 [System] [MY-010931] [Server] /usr/sbin/mysqld: ready for connections. Version: '8.0.25' socket: '/var/run/mysqld/mysqld.sock' port: 3306 MySQL Community Server - GPL.
 
-Open in Browser: http://localhost:8080/public/setup.php
+### First-time setup
 
-Wait for a long time and create an admin.
+Open in browser: http://localhost:8080/setup.php — wait a moment and create an admin.
 
-The configured setup password is `test123` — that's good for testing, not for production. To change it, set variable `SETUP_PASSWORD` in `docker compose.yml` to anything else, e.g.: `SETUP_PASSWORD: ChangeMe` before you open http://localhost:8080/public/setup.php the first time (or delete the database, see below), then follow the instructions on the page and you get a new hash to set in `SETUP_DATABASE`.
-
-If you use TLS, Configuration parameters are:
- - IMAP: `SSL/TLS` (port: `993`)
- - SMTP: `StartTLS` (port: `587`)
- - SIEVE: `StartTLS` (port: `4190`)
+The configured setup password is `test123` — that's good for testing, not for production. To change it, set variable `SETUP_PASSWORD` in `docker compose.yml` to anything else, e.g.: `SETUP_PASSWORD: ChangeMe` before you open http://localhost:8080/setup.php the first time (or delete the database, see below), then follow the instructions on the page and you get a new hash to set in `SETUP_DATABASE`.
 
 Access rights for the volumes, if on a local filesystem, must be set to: `100:1000`
 
-## Design Philosophy: Reliability over Filtering
+### Components
 
-Every message has exactly **two possible outcomes**:
+This stack is composed of independently maintained images:
 
-1. **Delivered** — the message arrives in the recipient's **INBOX**.
-2. **Rejected** — the sender receives a **correct, informative SMTP error** (RFC 5321 compliant) explaining why the message was refused.
+- Postfix — https://github.com/mwaeckerlin/postfix
+- Dovecot (IMAP/POP3/Sieve) — https://github.com/mwaeckerlin/dovecot
+- PostfixAdmin — https://github.com/mwaeckerlin/postfixadmin
+  and its nginx proxy — https://github.com/mwaeckerlin/postfixadmin-proxy
+- Greylisting — https://github.com/mwaeckerlin/postgrey (now uses milter-greylist)
+- SnappyMail webmail — see [Frontend: SnappyMail](#frontend-snappymail-web-mailer)
 
-There is no third outcome. Messages do **not** disappear into a spam folder, are **not** silently dropped, and are **not** quarantined without notification. Either the recipient has the mail, or the sender knows it was refused and why.
+### Upgrading PostfixAdmin
 
-This guarantee holds as long as the sender's infrastructure also follows the RFCs (i.e. correctly handles 4xx/5xx responses and does not forge envelope addresses).
-
-### How each component upholds this
-
-| Component | Behaviour on rejection |
-|-----------|----------------------|
-| Postfix restrictions (invalid HELO, unknown domain, relay attempt, RBL hit) | `5xx` permanent rejection — sender informed immediately |
-| Greylisting (milter-greylist) | `4xx` temporary deferral — RFC-compliant, sender retries automatically |
-| SPF hard fail (`-all`) | `550` permanent rejection — sender informed |
-| SPF soft-fail (`~all`), neutral, none | `DUNNO` — mail passes through to INBOX |
-| SPF / DNS temporary error | `4xx` deferral — sender retries |
-| DKIM verification failure | Header added, mail delivered — DKIM failure alone does not reject |
-
-There is deliberately **no spam folder** and **no content-based filtering** that could cause silent misdirection.
-
----
-
-## PostfixAdmin
-
-Includes: https://github.com/mwaeckerlin/postfixadmin
-Includes: https://github.com/mwaeckerlin/postfixadmin-proxy
-
-To upgrade the Postfixadmin by upgrading the image, you need to remove the `mailservice/postfixadmin` volume:
+To upgrade PostfixAdmin by upgrading the image, you need to remove the `mailservice/postfixadmin` volume:
 
 ```
 docker compose rm -vfs
 docker volume rm mailservice_postfixadmin
 ```
 
-Completly delete the database (loose al data), rebuild and use the new distribuition:
+Completely delete the database (lose all data), rebuild and use the new distribution:
 
 ```
 docker compose rm -vfs
@@ -92,21 +108,9 @@ docker compose build
 docker compose up
 ```
 
-## DoveCot IMAP
+### SPF, DKIM and DMARC
 
-Includes: https://github.com/mwaeckerlin/dovecot
-
-## Postfix
-
-Includes: https://github.com/mwaeckerlin/postfix
-
-## Greylisting
-
-Includes: https://github.com/mwaeckerlin/postgrey (now uses milter-greylist)
-
-## SPF, DKIM and DMARC
-
-### SPF (Sender Policy Framework)
+#### SPF (Sender Policy Framework)
 
 SPF lets receiving servers verify that inbound mail claiming to come from your domain was sent by an authorised server.
 
@@ -138,9 +142,7 @@ Common modifiers:
 - `ip4:1.2.3.4` — allow a specific IP
 - `include:sendgrid.net` — delegate to a third-party SPF record
 
----
-
-### DKIM (DomainKeys Identified Mail)
+#### DKIM (DomainKeys Identified Mail)
 
 DKIM adds a cryptographic signature to every outgoing message. Receiving servers use the public key published in DNS to verify the signature and confirm the message was not tampered with.
 
@@ -206,9 +208,7 @@ postfix:
     OPENDKIM: ""
 ```
 
----
-
-### DMARC (Domain-based Message Authentication, Reporting and Conformance)
+#### DMARC (Domain-based Message Authentication, Reporting and Conformance)
 
 DMARC ties SPF and DKIM together and tells receiving servers what to do when both checks fail. It is DNS-only — no server-side configuration is required in this stack.
 
@@ -236,11 +236,7 @@ Policy values:
 2. Once you are confident SPF and DKIM are working correctly, move to `p=quarantine`.
 3. Finally switch to `p=reject` for maximum protection.
 
----
-
-## Virus Scan (to do)
-
-## Frontend: SnappyMail Web-Mailer
+### Frontend: SnappyMail Web-Mailer
 
 [SnappyMail](https://snappymail.eu/) is the actively maintained successor to RainLoop. It includes the same PHP FPM + nginx container setup and is a drop-in replacement. See `rainloop/README.md` for migration instructions.
 
@@ -249,18 +245,111 @@ If you use TLS, configuration parameters are:
  - SMTP: `StartTLS` (port: `587`)
  - SIEVE: `StartTLS` (port: `4190`)
 
-## Local Development
+## Development
 
-`docker compose.local.yml` is an overlay for local testing — no root required, outbound mail is intercepted, a webmailer is included.
+### Image dependency chain
 
-### Start
+The images are layered — each builds on the previous:
+
+```
+mwaeckerlin/very-base
+  └── mwaeckerlin/smtp-relay        simple open relay (for other apps: Nextcloud, Gitea…)
+        ├── mwaeckerlin/smtp-relay-tls    same, with TLS support
+        └── mwaeckerlin/mailforward       mail forwarder (no own mailbox)
+              └── mwaeckerlin/postfix     full mail server ← core of this stack
+```
+
+`smtp-relay` and `smtp-relay-tls` are also published as standalone images for use by other Docker services that need an SMTP server without the full mailservice stack.
+
+### Tests
+
+```bash
+npm test            # full end-to-end suite (Postfix, Dovecot, greylisting,
+                    # SPF/DKIM, PostfixAdmin and SnappyMail web UIs)
+```
+
+The suite runs in a fully isolated stack (domain `test.local`, its own DNS) so
+no mail ever leaves the machine.
+
+### Manual testing in the isolated test stack
+
+This drives the same stack that `npm test` uses (domain `test.local`), but with
+the web UIs and mail ports published to `localhost` so you can drive it from a
+browser.
+
+The bundled `dns` service runs with `no-resolv`, so no external domain can be
+resolved: mail addressed outside `test.local` is rejected, never sent out.
+
+#### Start / stop
+
+```bash
+npm run test:manual        # build + start, prints the access URLs, stays running
+npm run test:manual:stop   # stop (data is preserved; add -v manually to wipe)
+```
+
+Host ports are fixed but deliberately uncommon (`478xx` range) so collisions
+with other projects are unlikely. If one is taken on your machine, change it in
+`tests/e2e/docker-compose.manual.yml`.
+
+#### Services and ports
+
+| Service | Address | Access |
+|---------|---------|--------|
+| PostfixAdmin | http://localhost:47808/setup.php | setup password: `test123` |
+| SnappyMail admin | http://localhost:47880/?admin | `admin` / `12345` |
+| SnappyMail webmail | http://localhost:47880/ | the accounts you create in PostfixAdmin |
+| SMTP | localhost:47825 | `swaks --server localhost:47825` |
+| IMAP | localhost:47843 | — |
+| POP3 | localhost:47810 | — |
+
+#### Walk-through: send a mail without touching the internet
+
+1. **Create the admin and the mailboxes in PostfixAdmin.**
+   - Open http://localhost:47808/setup.php, enter the setup password `test123`,
+     and create an admin account.
+   - Log in, add the domain `test.local`, then add two mailboxes, e.g.
+     `alice@test.local` and `bob@test.local`. Passwords must satisfy the policy:
+     at least 5 characters, 3 letters and 2 digits (e.g. `alicepass12`).
+2. **Point the webmail at the mail servers.** Open the SnappyMail admin at
+   http://localhost:47880/?admin (`admin` / `12345`) → *Domains* → *Add Domain*
+   `test.local`:
+   - IMAP host `dovecot`, port `143`
+   - SMTP host `postfix`, port `25`
+
+   (These are the **internal** container ports — unrelated to the host ports
+   above. It persists in the volume, so it is only needed once.)
+3. **Send.** Open http://localhost:47880/, log in as `alice@test.local`, compose
+   a mail to `bob@test.local`, send.
+4. **Receive.** Log in as `bob@test.local` and read it in the INBOX.
+
+You can also inject mail from the host with `swaks`:
+
+```bash
+swaks --to bob@test.local --from alice@test.local --server localhost:47825
+```
+
+Trying to send to an external address (e.g. `@gmail.com`) is refused with an
+SMTP error — the isolated DNS cannot resolve it, so it can never go out.
+
+#### Inspect trapped outbound mail
+
+```bash
+docker compose -f tests/e2e/docker-compose.yml -f tests/e2e/docker-compose.manual.yml \
+  exec fake-smtp ls /mails
+```
+
+### Local development overlay
+
+`docker compose.local.yml` is an overlay for local development — no root required, outbound mail is intercepted, a webmailer is included. Unlike the test stack above it uses the domain `localhost` and lets you create your own accounts.
+
+#### Start
 
 ```bash
 npm run start:local          # foreground (live logs)
 npm run start:local:daemon   # background
 ```
 
-### Services and ports
+#### Services and ports
 
 | Service | Address | Description |
 |---------|---------|-------------|
@@ -277,11 +366,11 @@ npm run start:local:daemon   # background
 
 All outbound mail is captured by [fake-smtp](../fake-smtp) — nothing leaves your machine.
 
-### One-time setup
+#### One-time setup
 
 **1. PostfixAdmin**
 
-Open http://localhost:8080/public/setup.php — setup password is `test123`.
+Open http://localhost:8080/setup.php — setup password is `test123`.
 Create an admin account, then add domain `localhost` and at least one mailbox (e.g. `alice@localhost`).
 
 **2. SnappyMail admin**
@@ -292,7 +381,7 @@ Add a domain configuration:
 - IMAP server: `dovecot`, port `143`
 - SMTP server: `postfix`, port `25`
 
-### Send and receive test mails
+#### Send and receive test mails
 
 Send from the host:
 
@@ -311,3 +400,32 @@ docker compose -f docker compose.yml -f docker compose.local.yml exec fake-smtp 
 # read a captured mail
 docker compose -f docker compose.yml -f docker compose.local.yml exec fake-smtp cat /mails/<filename>
 ```
+
+## Design philosophy: reliability over filtering
+
+Every message has exactly **two possible outcomes**:
+
+1. **Delivered** — the message arrives in the recipient's **INBOX**.
+2. **Rejected** — the sender receives a **correct, informative SMTP error** (RFC 5321 compliant) explaining why the message was refused.
+
+There is no third outcome. Messages do **not** disappear into a spam folder, are **not** silently dropped, and are **not** quarantined without notification. Either the recipient has the mail, or the sender knows it was refused and why.
+
+This guarantee holds as long as the sender's infrastructure also follows the RFCs (i.e. correctly handles 4xx/5xx responses and does not forge envelope addresses).
+
+### How each component upholds this
+
+| Component | Behaviour on rejection |
+|-----------|----------------------|
+| Postfix restrictions (invalid HELO, unknown domain, relay attempt, RBL hit) | `5xx` permanent rejection — sender informed immediately |
+| Greylisting (milter-greylist) | `4xx` temporary deferral — RFC-compliant, sender retries automatically |
+| SPF hard fail (`-all`) | `550` permanent rejection — sender informed |
+| SPF soft-fail (`~all`), neutral, none | `DUNNO` — mail passes through to INBOX |
+| SPF / DNS temporary error | `4xx` deferral — sender retries |
+| DKIM verification failure | Header added, mail delivered — DKIM failure alone does not reject |
+
+There is deliberately **no spam folder** and **no content-based filtering** that could cause silent misdirection.
+
+### Roadmap
+
+- Virus scanning is planned. It will follow the same principle: reject infected
+  mail with an informative SMTP error rather than silently quarantining it.

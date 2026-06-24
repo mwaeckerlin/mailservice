@@ -16,7 +16,7 @@ docker compose -f "$COMPOSE" build --quiet
 
 echo "==> Starting services..."
 docker compose -f "$COMPOSE" up -d --remove-orphans \
-    postfix dovecot postgrey opendkim dns db fake-smtp \
+    postfix dovecot postgrey opendkim dns fake-smtp \
     postfixadmin-db postfixadmin postfixadmin-proxy \
     snappymail snappymail-proxy
 

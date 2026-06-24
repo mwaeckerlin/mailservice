@@ -1,0 +1,30 @@
+# Overlay for MANUALLY exercising the isolated e2e test stack in a browser.
+#
+# It is the exact same stack that `npm test` runs (test.local domain, users
+# alice@test.local / bob@test.local pre-seeded), but with the web UIs and the
+# mail ports published to the host so you can click around yourself.
+#
+# Host ports are fixed but deliberately uncommon (478xx range, loosely derived
+# from the real service ports) to keep the collision probability with other
+# projects low. If one is taken on your machine, change it here.
+#
+# Isolation is unchanged and total: the bundled `dns` server runs with
+# `no-resolv`, so NO external domain can be resolved — mail can never reach the
+# internet. Anything addressed outside test.local is rejected, not sent.
+services:
+  postfixadmin-proxy:
+    ports:
+      - "47808:8080"   # PostfixAdmin → http://localhost:47808/setup.php
+
+  snappymail-proxy:
+    ports:
+      - "47880:8080"   # SnappyMail   → http://localhost:47880/
+
+  postfix:
+    ports:
+      - "47825:25"     # SMTP
+
+  dovecot:
+    ports:
+      - "47843:143"    # IMAP
+      - "47810:110"    # POP3
