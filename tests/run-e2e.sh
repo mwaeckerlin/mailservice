@@ -21,8 +21,8 @@ docker compose -f "$COMPOSE" up -d --remove-orphans \
     snappymail snappymail-proxy
 
 echo "==> Running tests..."
-docker compose -f "$COMPOSE" run --rm test-runner "$@"
-EXIT=$?
+EXIT=0
+docker compose -f "$COMPOSE" run --rm test-runner "$@" || EXIT=$?
 
 echo "==> Collecting logs on failure..."
 if [[ $EXIT -ne 0 ]]; then

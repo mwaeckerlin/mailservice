@@ -168,8 +168,12 @@ def test_postfixadmin_create_mailbox(browser: Browser, provision_mail_accounts):
     page.locator("[name='value[password2]']").fill("WebTest12")
     page.locator("[type=submit]").first.click()
     page.wait_for_load_state("networkidle", timeout=10_000)
-    assert "error" not in page.content().lower() or "webtest" in page.content(), \
-        "Mailbox creation may have failed"
+
+    # Verify the mailbox really exists: it must be listed for the domain.
+    page.goto(f"{PA_URL}/list-virtual.php?domain={DOMAIN}", timeout=15_000)
+    page.wait_for_load_state("networkidle", timeout=10_000)
+    assert f"webtest@{DOMAIN}" in page.content(), \
+        f"webtest@{DOMAIN} not listed after mailbox creation"
     page.close()
 
 

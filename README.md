@@ -108,6 +108,25 @@ docker compose build
 docker compose up
 ```
 
+#### Database schema upgrade after an image update
+
+When you upgrade the PostfixAdmin image but keep the existing database, the
+schema must be migrated to the new version — otherwise pages that use newer
+columns/tables (domain list, virtual list, fetchmail) fail with HTTP 500 while
+others (login, admin list) still work. The migration is **not** run on normal
+page access; trigger it once:
+
+- **Web:** open `/setup.php` (enter the setup password). `setup.php` includes
+  `upgrade.php`, which runs `_do_upgrade()` and applies the missing schema steps.
+- **CLI (no web):** run the upgrade script directly in the container — it needs
+  no setup password (only a valid DB config):
+
+  ```
+  docker exec <postfixadmin-container> php /app/public/upgrade.php
+  ```
+
+The database user needs `ALTER`/`CREATE` privileges for the upgrade to succeed.
+
 ### SPF, DKIM and DMARC
 
 #### SPF (Sender Policy Framework)

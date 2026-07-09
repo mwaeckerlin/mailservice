@@ -22,8 +22,8 @@ docker compose -f "$BASE" -f "$OVERLAY" up -d --remove-orphans \
     snappymail snappymail-proxy
 
 echo "==> Running UI tests..."
-docker compose -f "$BASE" -f "$OVERLAY" run --rm ui-test-runner "$@"
-EXIT=$?
+EXIT=0
+docker compose -f "$BASE" -f "$OVERLAY" run --rm ui-test-runner "$@" || EXIT=$?
 
 echo "==> Collecting logs on failure..."
 if [[ $EXIT -ne 0 ]]; then

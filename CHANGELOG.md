@@ -97,6 +97,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Dovecot 2.4 TLS config** (`dovecot/`): the SSL block used the pre-2.4 setting
+  names (`ssl_cert`/`ssl_key`/`ssl_prefer_server_ciphers`), which crashed Dovecot
+  2.4 with a fatal `Unknown setting: ssl_cert` and a restart loop whenever a
+  certificate was present. Now uses the 2.4 names (`ssl_server_cert_file`/
+  `ssl_server_key_file`, no `<` prefix) and `ssl = yes` instead of `required`
+  (`required` conflicts with `auth_allow_cleartext = yes` in 2.4 and would block
+  internal plaintext login on 143).
+- **e2e tests**: DKIM/SPF tests no longer skipped (`OPENDKIM` is always configured
+  in the stack); PostfixAdmin mailbox-creation test now verifies the mailbox is
+  actually listed for the domain; `run-e2e.sh`/`run-ui.sh` no longer abort under
+  `set -e` before collecting failure logs; obsolete `tests/e2e/Dockerfile` and
+  `tests/e2e/requirements.txt` removed (superseded by the Playwright image).
 - `smtpd_tls_auth_only = no` set explicitly when TLS is not configured, preventing
   Postfix from silently refusing cleartext auth in development setups.
 - **Frontend UI test suite** (`tests/e2e/test_webui.py`): the full PostfixAdmin and

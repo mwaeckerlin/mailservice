@@ -3,9 +3,7 @@ import email
 import imaplib
 import time
 
-import pytest
-
-from conftest import DOVECOT, IMAP_P, ALICE, ALICE_PW, OPENDKIM, smtp_send
+from conftest import DOVECOT, IMAP_P, ALICE, ALICE_PW, smtp_send
 
 
 def _wait_for_mail(conn: imaplib.IMAP4, subject: str, retries: int = 10) -> list[bytes]:
@@ -25,9 +23,8 @@ def _fetch_message(conn: imaplib.IMAP4, msg_id: bytes) -> email.message.Message:
 
 # ----------------------------------------------------------------- DKIM ------
 
-@pytest.mark.skipif(not OPENDKIM, reason="opendkim not configured (OPENDKIM_HOST unset)")
 def test_dkim_signature_present(unique_subject):
-    """Postfix adds a DKIM-Signature header when opendkim is configured."""
+    """Postfix adds a DKIM-Signature header to outgoing mail."""
     smtp_send(unique_subject)
     with imaplib.IMAP4(DOVECOT, IMAP_P) as conn:
         conn.login(ALICE, ALICE_PW)
@@ -38,7 +35,6 @@ def test_dkim_signature_present(unique_subject):
     assert sig, f"No DKIM-Signature header. All headers:\n{dict(msg)}"
 
 
-@pytest.mark.skipif(not OPENDKIM, reason="opendkim not configured (OPENDKIM_HOST unset)")
 def test_dkim_signature_fields(unique_subject):
     """DKIM-Signature header contains the correct domain and selector."""
     smtp_send(unique_subject)
