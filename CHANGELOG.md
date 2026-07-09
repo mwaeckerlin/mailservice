@@ -8,6 +8,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 
 - **README**: image dependency chain documented (`smtp-relay` → `mailforward` → `postfix`)
+- **README** (Administration): database version requirement documented — MariaDB 11+
+  is required because Dovecot 2.4's MySQL client needs TLS to the database; for an
+  older MariaDB without TLS, set `ssl = no` in Dovecot's MySQL passdb block.
+- **README** (Usage): after a server upgrade/migration every user must set a new
+  password in PostfixAdmin — Dovecot 2.4 refuses legacy weak password hashes
+  (e.g. `MD5-CRYPT`), so old passwords stop working until re-hashed.
 
 - **OpenDKIM service** (`opendkim/`): new container that auto-generates a 2048-bit RSA
   key on first start, signs outgoing mail and verifies incoming signatures (mode `sv`).
@@ -40,6 +46,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     networks; postfix wired to both milters with `MYNETWORKS=127.0.0.0/8`.
   - `conftest.py`: `OPENDKIM_HOST` config variable for optional service detection.
   - `run-e2e.sh`: starts `opendkim` and `dns` services alongside the rest of the stack.
+- **Maildir layout regression test** (`tests/e2e/test_maildir_layout.py`): delivers a
+  mail and asserts the on-disk maildir is created at `<domain>/<localpart>` (not the
+  full-email path), so legacy mailboxes cannot silently be orphaned again. Needs the
+  new shared `maildata` volume (dovecot store, mounted read-only into the test runner).
 - **Frontend UI test suite** (`tests/e2e/`):
   - `Dockerfile.playwright`: Playwright Python image for browser-based tests.
   - `requirements.playwright.txt`: `pytest` + `pytest-playwright` dependencies.
@@ -97,6 +107,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Dovecot 2.4 maildir path regression** (`dovecot/`): the 2.4 config port changed
+  the maildir layout from the pre-2.4 `maildir:/var/mail/domains/%d/%n`
+  (domain/localpart) to `mail_path = /var/mail/domains/%{user}` (full email), and
+  the userdb `home` likewise. Existing maildirs live at `<domain>/<localpart>/`, so
+  after the upgrade **every mailbox appeared empty and Sieve filters were gone**
+  (dovecot looked under `<full-email>/` and created empty maildirs there; Sieve
+  scripts live in `home`). Restored to `%{user | domain}/%{user | username}` for
+  both `mail_path` and `home`. Pinned by the new `test_maildir_layout.py` regression
+  test so the on-disk layout can no longer drift unnoticed.
 - **Dovecot 2.4 TLS config** (`dovecot/`): the SSL block used the pre-2.4 setting
   names (`ssl_cert`/`ssl_key`/`ssl_prefer_server_ciphers`), which crashed Dovecot
   2.4 with a fatal `Unknown setting: ssl_cert` and a restart loop whenever a

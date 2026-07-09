@@ -51,6 +51,11 @@ in with your full email address and password.
 
 Without TLS the plain ports are IMAP `143`, SMTP `25`, POP3 `110`.
 
+> **After a server upgrade or migration, set a new password.** Dovecot 2.4 refuses
+> legacy weak password hashes (e.g. `MD5-CRYPT` carried over from an older system),
+> so existing passwords stop working. Every user has to re-set their password once
+> in PostfixAdmin — it is then stored with a current, strong hash and login works.
+
 ## Administration
 
 ### Build and run
@@ -263,6 +268,15 @@ If you use TLS, configuration parameters are:
  - IMAP: `SSL/TLS` (port: `993`)
  - SMTP: `StartTLS` (port: `587`)
  - SIEVE: `StartTLS` (port: `4190`)
+
+### Database version
+
+Dovecot 2.4's MySQL client requires TLS for the database connection, so
+**MariaDB 11 or newer is required** — it provides TLS out of the box, so the
+`dovecot` → database connection works. With an older MariaDB that offers no TLS
+(e.g. 10.x) Dovecot fails with *"SSL is required, but the server does not
+support it"*; in that case set `ssl = no` in Dovecot's MySQL passdb block
+(`dovecot/start.sh`, inside `mysql { … }`).
 
 ## Development
 

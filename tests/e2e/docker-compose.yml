@@ -61,6 +61,8 @@ services:
       DOMAIN:               test.local
       # no DEFAULT_PASS_SCHEME → dovecot default SHA512-CRYPT, matching
       # PostfixAdmin's php_crypt ($6$…) hashes stored in the shared database
+    volumes:
+      - maildata:/var/mail/domains
     depends_on:
       postfixadmin-db:
         condition: service_healthy
@@ -192,6 +194,9 @@ services:
       SETUP_PASS:         test123
       SM_ADMIN_USER:      "admin"
       SM_ADMIN_PASS:      "12345"
+    volumes:
+      # read the dovecot maildir store to assert the on-disk mailbox layout
+      - maildata:/var/mail/domains:ro
     networks: [mail, ui-net]
     command: ["pytest", "-v", "--tb=short"]
 
@@ -210,3 +215,4 @@ volumes:
   fake-mails:
   dkim-keys:
   snappymail-data:
+  maildata:
