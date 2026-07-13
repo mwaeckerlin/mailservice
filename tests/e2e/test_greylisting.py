@@ -11,7 +11,7 @@ import smtplib
 import time
 import imaplib
 import pytest
-from conftest import POSTFIX, SMTP_P, DOVECOT, IMAP_P, ALICE, ALICE_PW, DOMAIN, build_message
+from conftest import POSTFIX, SMTP_P, DOVECOT, IMAP_P, ALICE, ALICE_PW, BOB, DOMAIN, build_message
 
 
 GREYLIST_SENDER       = f"greylister@{DOMAIN}"         # used only by test_greylisting_first_attempt_rejected
@@ -108,3 +108,23 @@ def test_greylisting_known_sender_not_delayed(unique_subject):
         s.ehlo(f"testhost.{DOMAIN}")
         result = s.sendmail(sender, [ALICE], build_message(subject2, from_=sender))
     assert result == {}, f"Auto-whitelisted sender was still greylisted: {result}"
+
+
+def test_authenticated_submission_not_greylisted(unique_subject):
+    """SASL-authenticated submission must NEVER be greylisted.
+
+    Mail philosophy: a mail client (webmail) only hands the mail to postfix;
+    postfix owns delivery, queuing and retries.  Greylisting is an INBOUND
+    anti-spam measure — it must not tempfail our own users' submissions,
+    otherwise interactive clients (SnappyMail) surface a 451 to the user and
+    the mail never reaches the postfix queue.
+    """
+    # sender deliberately NOT in the greylist.conf sender whitelist and unique
+    # per run, so only the `auth` whitelist can let this pass
+    sender  = f"auth-{unique_subject.lower()}@{DOMAIN}"
+    subject = f"grey-auth-{unique_subject}"
+    with smtplib.SMTP(POSTFIX, SMTP_P) as s:
+        s.ehlo(f"testhost.{DOMAIN}")
+        s.login(ALICE, ALICE_PW)
+        result = s.sendmail(sender, [BOB], build_message(subject, from_=sender, to=BOB))
+    assert result == {}, f"Authenticated submission was greylisted: {result}"

@@ -436,6 +436,26 @@ docker compose -f docker compose.yml -f docker compose.local.yml exec fake-smtp 
 
 ## Design philosophy: reliability over filtering
 
+### Outbound: submission is final — the server owns delivery
+
+A mail client (webmail, IMAP client) has exactly one job when sending: hand the
+message to Postfix. From that moment **Postfix owns delivery** — it queues the
+message and retries temporary failures (e.g. greylisting at the recipient's
+server) automatically until the mail is delivered or a permanent error occurs.
+
+- Once a message is accepted at submission, the sender may assume it will
+  successfully leave this server. No manual re-sending, ever.
+- Only **real** (permanent) errors are reported — as a bounce message to the
+  sender. Temporary errors are retried, never surfaced to the user.
+- Consequently, **greylisting never applies to our own users**: SASL-
+  authenticated clients and the internal container networks are whitelisted in
+  milter-greylist (the equivalent of `permit_sasl_authenticated,
+  permit_mynetworks` preceding the former policy check). A greylisting `451`
+  at submission would push the retry burden onto the human in front of the
+  webmail — the opposite of this guarantee.
+
+### Inbound: delivered or rejected — nothing in between
+
 Every message has exactly **two possible outcomes**:
 
 1. **Delivered** — the message arrives in the recipient's **INBOX**.

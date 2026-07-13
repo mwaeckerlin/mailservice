@@ -15,6 +15,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   password in PostfixAdmin — Dovecot 2.4 refuses legacy weak password hashes
   (e.g. `MD5-CRYPT`), so old passwords stop working until re-hashed.
 
+- **README** (Design philosophy): new «Outbound» section — a client only hands
+  mail to Postfix; Postfix owns delivery, queuing and retries; greylisting never
+  applies to own (authenticated/internal) users; only permanent errors are
+  reported, as a bounce.
 - **OpenDKIM service** (`opendkim/`): new container that auto-generates a 2048-bit RSA
   key on first start, signs outgoing mail and verifies incoming signatures (mode `sv`).
   Key is persisted in the `dkim-keys` volume. DNS TXT record is printed to the log on
@@ -107,6 +111,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Sending mail no longer fails with «451 Greylisting in action»** (`postgrey/`):
+  since the migration from postgrey to milter-greylist, the milter ran for EVERY
+  smtpd connection — the former `check_policy_service` only ran after
+  `permit_sasl_authenticated, permit_mynetworks`. On top of that the container
+  started milter-greylist with `-A` (explicitly disables the built-in SMTP-AUTH
+  whitelisting) and `-a 5` (auto-whitelist for only 5 **seconds**), so every
+  webmail/IMAP-client submission was greylisted again and again and the user had
+  to re-send manually — the mail never reached the postfix queue. Fixed:
+  - milter-greylist flags: `-A` removed, auto-whitelist set to 35 days
+    (`-w 300 -a 35d`, the classic postgrey defaults).
+  - `greylist.conf`: SASL-authenticated clients (`racl whitelist auth /.*/`) and
+    the internal container networks (loopback + RFC1918) whitelisted — the milter
+    equivalent of the former `permit_sasl_authenticated, permit_mynetworks`;
+    `racl greylist default` removed (it disables the built-in auto-whitelist).
+  - Pinned by a new e2e regression test: a SASL-authenticated submission must be
+    accepted, never greylisted (`test_authenticated_submission_not_greylisted`).
 - **Dovecot 2.4 maildir path regression** (`dovecot/`): the 2.4 config port changed
   the maildir layout from the pre-2.4 `maildir:/var/mail/domains/%d/%n`
   (domain/localpart) to `mail_path = /var/mail/domains/%{user}` (full email), and
