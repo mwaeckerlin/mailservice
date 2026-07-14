@@ -134,6 +134,21 @@ The database user needs `ALTER`/`CREATE` privileges for the upgrade to succeed.
 
 ### SPF, DKIM and DMARC
 
+One mailservice can send and receive mail for many independent domains.
+Throughout this section the mailservice itself runs on `example.email`, and
+serves the following four domains as an example:
+
+- `example.com`
+- `example.net`
+- `example.email` (same as the mailservice hostname)
+- `example.org`
+
+Postfix accepts mail for the extra domains once they are added in
+PostfixAdmin (each becomes a `virtual_mailbox_domain`); no `docker
+compose.yml` change is needed for that. SPF, DKIM and DMARC on the other
+hand are **per sending domain** — each domain owns its own DNS records
+below, and DKIM signs with a **separate key per domain**.
+
 #### SPF (Sender Policy Framework)
 
 SPF lets receiving servers verify that inbound mail claiming to come from your domain was sent by an authorised server.
@@ -166,6 +181,34 @@ Common modifiers:
 - `ip4:1.2.3.4` — allow a specific IP
 - `include:sendgrid.net` — delegate to a third-party SPF record
 
+**Multi-domain**
+
+Every sending domain needs its own SPF record. If all mail leaves through the
+mailservice on `example.email`, either list its IP explicitly on every domain,
+or — cleaner — publish one SPF record on `example.email` and let the others
+`include:` it:
+
+```
+Name:  example.email
+Type:  TXT
+Value: v=spf1 mx ~all
+
+Name:  example.com
+Type:  TXT
+Value: v=spf1 include:example.email ~all
+
+Name:  example.net
+Type:  TXT
+Value: v=spf1 include:example.email ~all
+
+Name:  example.org
+Type:  TXT
+Value: v=spf1 include:example.email ~all
+```
+
+With `include:` a single change to `example.email`'s SPF record (a new
+outbound relay, an added IP) propagates to every domain automatically.
+
 #### DKIM (DomainKeys Identified Mail)
 
 DKIM adds a cryptographic signature to every outgoing message. Receiving servers use the public key published in DNS to verify the signature and confirm the message was not tampered with.
@@ -185,8 +228,8 @@ postfix:
 
 opendkim:
   environment:
-    DOMAIN:   example.com   # required — your mail domain
-    SELECTOR: mail           # optional, default: mail
+    DOMAIN:   example.com   # required — your mail domain (single-domain form)
+    SELECTOR: mail          # optional, default: mail
   volumes:
     - dkim-keys:/etc/opendkim/keys
 ```
@@ -222,6 +265,54 @@ The private key is persisted in the `dkim-keys` volume — back it up and keep i
 4. After the old selector's TTL expires, remove it from DNS.
 5. Remove the old key from the volume if desired.
 
+**Multi-domain**
+
+For more than one sending domain use `DOMAINS` (space-separated). OpenDKIM
+generates one 2048-bit key **per domain**, prints one DNS TXT record per
+domain on first start, and signs `From:` addresses of any listed domain with
+that domain's key:
+
+```yaml
+opendkim:
+  environment:
+    DOMAINS:  "example.com example.net example.email example.org"
+    SELECTOR: mail
+  volumes:
+    - dkim-keys:/etc/opendkim/keys
+```
+
+Publish one DNS record per domain:
+
+```
+Name:  mail._domainkey.example.com
+Type:  TXT
+Value: v=DKIM1; h=sha256; k=rsa; p=<public-key-for-example.com>
+
+Name:  mail._domainkey.example.net
+Type:  TXT
+Value: v=DKIM1; h=sha256; k=rsa; p=<public-key-for-example.net>
+
+Name:  mail._domainkey.example.email
+Type:  TXT
+Value: v=DKIM1; h=sha256; k=rsa; p=<public-key-for-example.email>
+
+Name:  mail._domainkey.example.org
+Type:  TXT
+Value: v=DKIM1; h=sha256; k=rsa; p=<public-key-for-example.org>
+```
+
+Notes:
+
+- The selector name (`mail` by default) is shared across all domains — each
+  domain still has its own key because the DNS record lives under
+  `mail._domainkey.<domain>` on that domain's own zone.
+- Keys are persisted per domain at `/etc/opendkim/keys/<domain>/mail.private`
+  in the `dkim-keys` volume. Adding a new domain later means: extend
+  `DOMAINS`, restart the container, publish the printed DNS record. Existing
+  domains' keys are reused (not regenerated).
+- `DOMAIN` (singular) is kept as the single-domain fallback and is used only
+  when `DOMAINS` is unset.
+
 **Disable DKIM signing in postfix**
 
 Remove or leave empty the `OPENDKIM` environment variable:
@@ -253,6 +344,37 @@ Policy values:
 
 - `rua=mailto:…` — aggregate reports (daily summaries)
 - `ruf=mailto:…` — forensic reports (individual failures)
+
+**Multi-domain**
+
+DMARC is DNS-only, so each sending domain publishes its own `_dmarc.<domain>`
+record. The `rua`/`ruf` mailbox may live on any domain — pointing every
+domain's reports to a single inbox on `example.email` centralises
+monitoring:
+
+```
+Name:  _dmarc.example.com
+Type:  TXT
+Value: v=DMARC1; p=none; rua=mailto:dmarc-reports@example.email
+
+Name:  _dmarc.example.net
+Type:  TXT
+Value: v=DMARC1; p=none; rua=mailto:dmarc-reports@example.email
+
+Name:  _dmarc.example.email
+Type:  TXT
+Value: v=DMARC1; p=none; rua=mailto:dmarc-reports@example.email
+
+Name:  _dmarc.example.org
+Type:  TXT
+Value: v=DMARC1; p=none; rua=mailto:dmarc-reports@example.email
+```
+
+If a report inbox on a **different** domain from the DMARC record is used,
+that inbox's domain must also authorise it via an
+`example.email._report._dmarc.<sender-domain>` TXT record — see RFC 7489.
+Same-domain (`dmarc-reports@example.com` on `_dmarc.example.com`) needs no
+extra record.
 
 **Recommended roll-out sequence**
 

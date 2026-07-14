@@ -7,6 +7,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **OpenDKIM multi-domain support** (`opendkim/`): new `DOMAINS` environment
+  variable (space-separated list) generates and manages one 2048-bit RSA DKIM
+  key per domain, prints one DNS TXT record per domain on first start, and
+  signs `From:` addresses of every listed domain with the matching key. Adding
+  a domain later reuses existing keys (only the new key is generated). The old
+  `DOMAIN` (singular) variable is kept as the single-domain fallback.
+- **README** (SPF, DKIM, DMARC): new «Multi-domain» subsections show how one
+  mailservice serves several sending domains — SPF via `include:` chaining,
+  DKIM via `DOMAINS=` and one DNS record per domain, DMARC via one
+  `_dmarc.<domain>` record per domain with a shared report inbox.
 - **README**: image dependency chain documented (`smtp-relay` → `mailforward` → `postfix`)
 - **README** (Administration): database version requirement documented — MariaDB 11+
   is required because Dovecot 2.4's MySQL client needs TLS to the database; for an
@@ -78,6 +88,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **OpenDKIM image is now multi-stage and shell-free** (same pattern as
+  `mwaeckerlin/nginx` and `mwaeckerlin/php-fpm`): three stages — a statically
+  linked C++ helper (`init.cpp`) is compiled in stage 1; stage 2 installs
+  `opendkim` + `openssl` and uses `tar cph … + ldd` to collect only the
+  needed binaries, shared libraries and configs into `/root/`; stage 3 is
+  `FROM mwaeckerlin/scratch` and just `COPY --from=build /root/ /`.
+  The runtime image contains no shell, no package manager, and no Perl —
+  `opendkim-genkey` (Perl script) is replaced by `init.cpp`, which generates
+  the 2048-bit RSA key per domain by forking `openssl genrsa` directly. The
+  old `opendkim/start.sh` is gone. Multi-domain behavior is unchanged.
 - **e2e test stack uses a single shared database** (mirrors production): Postfix,
   Dovecot and PostfixAdmin now all use `postfixadmin-db`; the separate mail `db`
   service and the `tests/e2e/init/db.sql` pre-seed were removed. Accounts are no

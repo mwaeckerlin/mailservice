@@ -20,7 +20,7 @@ services:
       - dkim-keys:/etc/opendkim/keys
     networks: [dkim-net]
     healthcheck:
-      test: ["CMD-SHELL", "test -s /run/opendkim/opendkim.pid && kill -0 $(cat /run/opendkim/opendkim.pid)"]
+      test: ["CMD", "/usr/bin/init", "--healthcheck"]
       interval: 2s
       timeout: 5s
       retries: 20
