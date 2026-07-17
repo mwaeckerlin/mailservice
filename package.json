@@ -1,6 +1,6 @@
 {
   "name": "@mwaeckerlin/mailservice",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "scripts": {
     "build": "docker compose build",
     "start": "docker compose up --build --force-recreate --remove-orphans",
@@ -9,7 +9,8 @@
     "start:local": "docker compose -f docker-compose.yml -f docker-compose.local.yml up --build --force-recreate --remove-orphans",
     "start:local:daemon": "docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build --force-recreate --remove-orphans",
     "stop": "docker compose down",
-    "test": "npm run test:e2e",
+    "test": "npm run test:image && npm run test:e2e",
+    "test:image": "docker compose -f docker-compose.yml -f docker-compose.local.yml build --quiet && bash tests/image-contract.sh mwaeckerlin/opendkim mwaeckerlin/opendmarc mwaeckerlin/postfixadmin mwaeckerlin/postfixadmin-proxy mwaeckerlin/snappymail:php-fpm mwaeckerlin/snappymail:nginx",
     "test:e2e": "bash tests/run-e2e.sh",
     "test:ui": "bash tests/run-ui.sh",
     "test:manual": "bash tests/run-manual.sh",

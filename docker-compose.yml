@@ -68,10 +68,34 @@ services:
     build: opendkim
     environment:
       DOMAIN: mrw.sh
+      # AUTHSERV_ID: your.domain     # must match opendmarc's AUTHSERV_ID
+      # DKIM_DMARC is the single knob shared with opendmarc — one of
+      #   off        no verify, no A-R (opendmarc/opendkim pass through)
+      #   log        verify, stamp Authentication-Results, NEVER reject
+      #              (run for a few days after an upgrade — grep the
+      #              A-R header in delivered mail for `dkim=fail`,
+      #              `dkim=none`, `dmarc=fail`; then escalate)
+      #   permissive reject bad or unknown-key DKIM; accept unsigned
+      #              (Marc's philosophy for real mailservers: DKIM is
+      #              optional but must be correct if published)
+      #   reject     everything under permissive, plus reject unsigned
+      # Image default is `reject` (strict). Start with `log` for a fresh
+      # upgrade, then escalate once no legitimate mail is affected.
+      DKIM_DMARC: log
     volumes:
       - type: volume
         source: dkim-keys
         target: /etc/opendkim/keys
+    networks:
+      - dkim-net
+
+  opendmarc:
+    image: mwaeckerlin/opendmarc
+    build: opendmarc
+    environment:
+      # AUTHSERV_ID: your.domain     # must match opendkim's AUTHSERV_ID
+      # Keep DKIM_DMARC in sync with opendkim — see above.
+      DKIM_DMARC: log
     networks:
       - dkim-net
 
@@ -116,6 +140,7 @@ services:
     environment:
       GREYLIST: "postgrey"
       OPENDKIM: "opendkim"
+      OPENDMARC: "opendmarc"
       HOSTNAME: merkur.mrw.sh
       HOSTROOT: mrw.sh
       DOMAIN: mrw.sh

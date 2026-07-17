@@ -13,9 +13,11 @@ import pytest
 
 # ----------------------------------------------------------------- Config ---
 
-POSTFIX   = os.environ.get("POSTFIX_HOST",  "postfix")
-DOVECOT   = os.environ.get("DOVECOT_HOST",  "dovecot")
-OPENDKIM  = os.environ.get("OPENDKIM_HOST", "")
+POSTFIX        = os.environ.get("POSTFIX_HOST",         "postfix")
+POSTFIX_STRICT = os.environ.get("POSTFIX_STRICT_HOST",  "postfix-strict")
+POSTFIX_LOG    = os.environ.get("POSTFIX_LOG_HOST",     "postfix-log")
+DOVECOT        = os.environ.get("DOVECOT_HOST",         "dovecot")
+OPENDKIM       = os.environ.get("OPENDKIM_HOST",        "")
 SMTP_P    = int(os.environ.get("SMTP_PORT",     "25"))
 IMAP_P    = int(os.environ.get("IMAP_PORT",    "143"))
 POP3_P    = int(os.environ.get("POP3_PORT",    "110"))
@@ -84,12 +86,14 @@ def smtp_send(subject: str, to: str = ALICE,
 
 @pytest.fixture(scope="session", autouse=True)
 def wait_for_services():
-    wait_for_port(POSTFIX, SMTP_P)
+    wait_for_port(POSTFIX,        SMTP_P)
+    wait_for_port(POSTFIX_STRICT, SMTP_P)
+    wait_for_port(POSTFIX_LOG,    SMTP_P)
     wait_for_port(DOVECOT, IMAP_P)
     wait_for_port(DOVECOT, POP3_P)
     wait_for_port(DOVECOT, SIEVE_P)
-    # opendkim: guaranteed healthy by docker-compose before postfix starts;
-    # test-runner does not need direct access to port 10026.
+    # opendkim(-strict): guaranteed healthy by docker-compose before postfix
+    # starts; test-runner does not need direct access to port 10026.
     time.sleep(3)
 
 

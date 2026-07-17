@@ -313,6 +313,107 @@ Notes:
 - `DOMAIN` (singular) is kept as the single-domain fallback and is used only
   when `DOMAINS` is unset.
 
+**DKIM/DMARC verification — single knob `DKIM_DMARC`**
+
+Both opendkim and opendmarc read one env var, `DKIM_DMARC`, with four
+levels:
+
+| `DKIM_DMARC` | Meaning                                                                                                                                    |
+|--------------|--------------------------------------------------------------------------------------------------------------------------------------------|
+| `off`        | Verification stage is off. Outgoing mail is still signed, incoming mail passes through untouched (no `Authentication-Results` header).     |
+| `log`        | Verify every incoming signature and DMARC policy, stamp the result into an `Authentication-Results` header — **never reject**.             |
+| `permissive` | Reject bad or unknown-key DKIM signatures (5.7.20); accept unsigned mail. Reject on `_dmarc … p=reject` hard fail (5.7.1). Marc's default. |
+| `reject`     | On top of `permissive`, also reject mail without a DKIM signature. Right for ingresses where every peer is known to sign.                  |
+
+Set the SAME value on both `opendkim` and `opendmarc` (they must agree so
+opendmarc trusts opendkim's `dkim=` verdict).
+
+**Image default is `reject`** (strict enforcement). See «Upgrade &
+Monitoring» below for the recommended path from log to permissive.
+
+Own users are unaffected: SASL-authenticated submissions bypass the
+milter through the whitelist ordering, just like for greylisting.
+
+**Upgrade & Monitoring — how to check before you enforce**
+
+Before you flip a running mailservice to `permissive` or `reject`, run in
+`log` mode for a few days and watch what would have been rejected.
+
+1. In your `docker-compose.yml`, set both milters to log mode:
+
+    ```yaml
+    opendkim:
+      environment:
+        DKIM_DMARC: log
+    opendmarc:
+      environment:
+        DKIM_DMARC: log
+    ```
+
+2. Restart the two services:
+
+    ```
+    docker compose up -d opendkim opendmarc
+    ```
+
+3. Watch for verdicts in delivered mail. Every incoming mail is stamped
+   with an `Authentication-Results` header — grep those on any mailbox
+   or in the dovecot log:
+
+    ```
+    docker compose exec dovecot grep -rE '^Authentication-Results:.*(dkim=fail|dkim=none|dkim=permerror|dmarc=fail)' /var/mail/domains/ | head
+    ```
+
+    Or, if you have IMAP access, search server-side:
+
+    ```
+    imap> UID SEARCH HEADER Authentication-Results "dkim=fail"
+    imap> UID SEARCH HEADER Authentication-Results "dmarc=fail"
+    ```
+
+4. Also watch the milter containers' own logs at start-up — they print
+   their current mode:
+
+    ```
+    docker compose logs opendkim opendmarc | grep '\*\*\*\* Starting Open'
+    ```
+
+    Expected output for log mode:
+    `**** Starting OpenDKIM in mode=log (verify, add A-R, never reject) …`
+
+5. For every `dkim=fail`, `dkim=permerror` or `dmarc=fail (p=reject
+   dis=none)` you find, decide: is this a real sender that would get
+   bounced under enforcement, or a broken/forged mail that _should_ be
+   bounced? If it's a real sender, contact them so they can fix their
+   DKIM/DMARC or their forwarding chain (a mailing list that breaks
+   DMARC alignment must be re-signing with its own domain or rewriting
+   `From:` for `p=reject` senders — modern Mailman does this
+   automatically).
+
+6. Once no legitimate mail is affected, escalate. Typical path:
+   `log` → `permissive` (rejects broken DKIM and `p=reject` failures but
+   still accepts mail from small senders that publish nothing) →
+   optionally `reject` (only for an ingress where every peer is a known
+   signer).
+
+**Key rotation window: `DKIM_KEYERROR_ACTION=tempfail`**
+
+If you expect legitimate senders in the middle of a DKIM key rotation,
+opendkim can return a `4xx` (temporary failure) instead of `5.7.20` when
+the referenced DKIM key is missing in DNS:
+
+```yaml
+opendkim:
+  environment:
+    DKIM_DMARC:            permissive
+    DKIM_KEYERROR_ACTION:  tempfail    # 4xx instead of 5xx on KeyNotFound
+```
+
+The sender's MX will retry (typically for ~5 days) and the sender gets a
+delayed-notification if it still fails. Default `reject` gives the sender
+an immediate bounce with the actual error — usually better because the
+sender's admin sees the problem right away.
+
 **Disable DKIM signing in postfix**
 
 Remove or leave empty the `OPENDKIM` environment variable:
@@ -323,9 +424,79 @@ postfix:
     OPENDKIM: ""
 ```
 
+**Adding DKIM + DMARC to an existing compose file (2.0.0 upgrade path)**
+
+If you are upgrading from an older release where `opendkim` and
+`opendmarc` were not part of your stack, **nothing breaks on a plain
+image update**: `postfix/start.sh` only wires the milter in when the
+`OPENDKIM` / `OPENDMARC` env is set, and the shipped Dockerfile default
+for both is empty. Pulling the new images without changing your compose
+file leaves the milter chain identical to before — no DKIM signing, no
+DKIM/DMARC verification, no risk of legitimate mail being bounced.
+
+To actually enable the feature, add the two services and reference them
+from postfix. **Start in log mode** so any legitimate sender that would
+be affected by real enforcement shows up in the delivered mail's
+`Authentication-Results` header before you flip the switch:
+
+```yaml
+services:
+  opendkim:
+    image: mwaeckerlin/opendkim
+    environment:
+      DOMAINS:     "example.com example.org"   # every domain you sign for
+      AUTHSERV_ID: mail.example.com            # any label; must match opendmarc
+      DKIM_DMARC:  log                         # start in monitor mode
+    volumes:
+      - dkim-keys:/etc/opendkim/keys           # persist per-domain keys
+    networks: [dkim-net]
+
+  opendmarc:
+    image: mwaeckerlin/opendmarc
+    environment:
+      AUTHSERV_ID: mail.example.com            # SAME value as opendkim
+      DKIM_DMARC:  log
+    networks: [dkim-net]
+
+  postfix:
+    # (your existing postfix service — add these two env vars and the network)
+    environment:
+      OPENDKIM:  opendkim
+      OPENDMARC: opendmarc
+    networks:
+      # ...your existing networks...
+      dkim-net:
+
+networks:
+  # ...your existing networks...
+  dkim-net:
+
+volumes:
+  # ...your existing volumes...
+  dkim-keys:
+```
+
+On first start, `opendkim` prints one `DNS TXT record` per domain in
+`DOMAINS` to its container log — publish each one under
+`mail._domainkey.<domain>` in DNS. Then follow the «Upgrade & Monitoring»
+recipe above to escalate `DKIM_DMARC` from `log` → `permissive` → (only
+if all your peers sign) → `reject`.
+
 #### DMARC (Domain-based Message Authentication, Reporting and Conformance)
 
-DMARC ties SPF and DKIM together and tells receiving servers what to do when both checks fail. It is DNS-only — no server-side configuration is required in this stack.
+DMARC ties SPF and DKIM together and tells receiving servers what to do
+when both checks fail. **On the sending side** it is DNS-only. **On the
+receiving side** the mailservice runs `opendmarc` as a milter after
+opendkim. Its behavior is controlled by the same `DKIM_DMARC` env as
+opendkim — see the DKIM section above. On `permissive` or `reject`
+opendmarc will reject a mail whose `From:` domain publishes `p=reject`
+and that passes neither DKIM nor SPF alignment (`550 5.7.1`); on `log`
+it stamps the result but never rejects; on `off` it does nothing.
+
+`opendmarc` is wired in by default in `docker compose.yml` via
+`OPENDMARC: opendmarc` on the postfix service and connects to port 8893.
+Own users (SASL-authenticated submissions and internal container networks)
+bypass the milter through `TRUSTED_HOSTS`.
 
 **Minimal DNS record**
 
@@ -575,6 +746,30 @@ server) automatically until the mail is delivered or a permanent error occurs.
   permit_mynetworks` preceding the former policy check). A greylisting `451`
   at submission would push the retry burden onto the human in front of the
   webmail — the opposite of this guarantee.
+
+### Reject reasons — end-user first, then the admin
+
+Every reject must return a reason the sender can act on:
+
+- **First address the end user** in plain, non-technical wording — «Your
+  mail could not be delivered because …». Never a bare `5.7.0` or
+  «policy violation».
+- **Then add the technical hint the admin needs** to find the misconfig
+  — DKIM selector, DMARC policy, SPF result, greylist retry window,
+  whatever is relevant.
+
+Example (DMARC quarantine rejected because this server does not accept
+quarantine):
+
+> `550 5.7.1 DMARC is configured with p=quarantine, but the check failed.
+> Your mail was marked as quarantine; this server does not accept
+> quarantined mail (no Junk folder) and rejects it as potential spam.
+> (Admin: check `_dmarc.<sender-domain>` policy, DKIM signature and SPF
+> alignment against `<From:>`.)`
+
+The current opendkim/opendmarc/greylist error strings are not yet
+uniformly at this level of detail — this is a follow-up feature that
+will refine the milter-side reject templates.
 
 ### Inbound: delivered or rejected — nothing in between
 

@@ -23,7 +23,27 @@ Behavior (identical to the old start.sh):
        - Append one line to KeyTable and one to SigningTable so opendkim
          signs *@<domain> with <selector>._domainkey.<domain>.
   5. (Re)write /etc/opendkim/TrustedHosts with loopback + RFC1918.
-  6. execvp("/usr/sbin/opendkim", "-f", "-x", "/etc/opendkim.conf").
+  6. Compose /run/opendkim/opendkim.conf from /etc/opendkim.conf.base plus
+     the mode selected by DKIM_DMARC — a single knob with four levels:
+       - off        : Mode "s" — sign only, do NOT verify incoming, add no
+                      Authentication-Results header. The filter is
+                      effectively disabled for inbound traffic.
+       - log        : Mode "sv" + AlwaysAddARHeader true — verify every
+                      incoming signature and stamp the verdict into an
+                      Authentication-Results header, but never reject.
+                      This is the monitor mode operators run before
+                      switching to actual enforcement.
+       - permissive : Mode "sv" + On-BadSignature and On-KeyNotFound set
+                      to reject (subject to DKIM_KEYERROR_ACTION, which
+                      may lower the KeyNotFound path to tempfail). Mail
+                      without any DKIM signature is accepted — this is
+                      the "DKIM is optional, but if you publish it it
+                      must be correct" stance.
+       - reject     : Everything under permissive, plus On-NoSignature
+                      reject — every incoming mail must carry a valid
+                      DKIM signature. Intended for ingresses where every
+                      peer is known to sign.
+  7. execvp("/usr/sbin/opendkim", "-f", "-x", "/run/opendkim/opendkim.conf").
 
 */
 
@@ -47,11 +67,13 @@ namespace {
 
 constexpr const char *OPENSSL         = "/usr/bin/openssl";
 constexpr const char *OPENDKIM        = "/usr/sbin/opendkim";
-constexpr const char *OPENDKIM_CONF   = "/etc/opendkim.conf";
+constexpr const char *CONF_BASE       = "/etc/opendkim.conf.base";
+constexpr const char *CONF_RUNTIME    = "/run/opendkim/opendkim.conf";
 constexpr const char *KEYS_ROOT       = "/etc/opendkim/keys";
 constexpr const char *KEY_TABLE       = "/etc/opendkim/KeyTable";
 constexpr const char *SIGNING_TABLE   = "/etc/opendkim/SigningTable";
 constexpr const char *TRUSTED_HOSTS   = "/etc/opendkim/TrustedHosts";
+constexpr const char *IGNORE_HOSTS    = "/etc/opendkim/IgnoreHosts";
 constexpr const char *PID_FILE        = "/run/opendkim/opendkim.pid";
 
 std::string
@@ -181,15 +203,88 @@ generate_key(const std::string &domain, const std::string &selector) {
             << "==================================================================\n\n";
 }
 
+enum class Mode { Off, Log, Permissive, Reject };
+
+Mode
+parse_mode(const std::string &s) {
+  if (s == "off")        return Mode::Off;
+  if (s == "log")        return Mode::Log;
+  if (s == "permissive") return Mode::Permissive;
+  if (s == "reject")     return Mode::Reject;
+  throw std::runtime_error(
+      "DKIM_DMARC must be one of: off, log, permissive, reject (got \"" + s + "\")");
+}
+
+// Compose /run/opendkim/opendkim.conf from the immutable base config plus
+// the mode-derived directives. Written under /run/ because /etc/ is not
+// writable by the unprivileged user in the scratch runtime image.
 void
-write_trusted_hosts() {
-  write_file(TRUSTED_HOSTS,
-             "127.0.0.1\n"
-             "::1\n"
-             "localhost\n"
-             "10.0.0.0/8\n"
-             "172.16.0.0/12\n"
-             "192.168.0.0/16\n");
+write_opendkim_conf(Mode mode, const std::string &keyerror_action,
+                    const std::string &authserv_id,
+                    const std::string &nameservers) {
+  std::string conf = read_file(CONF_BASE);
+  if (!conf.empty() && conf.back() != '\n') conf += '\n';
+
+  // AuthservID must match opendmarc's TrustedAuthservIDs so opendmarc
+  // consumes opendkim's dkim= verdict when deciding DMARC alignment.
+  conf += "\nAuthservID       " + authserv_id + "\n";
+  if (!nameservers.empty()) {
+    // Comma-separated list of DNS servers used exclusively for DKIM key
+    // lookups. Bypasses the libc resolver — see opendkim.conf.base for why.
+    conf += "Nameservers      " + nameservers + "\n";
+  }
+
+  switch (mode) {
+    case Mode::Off:
+      // Sign outgoing mail only, do NOT verify incoming. No A-R header is
+      // added by opendkim in this mode — an operator can effectively
+      // disable the whole DKIM verification stage while still signing
+      // their own users' mail.
+      conf += "\nMode             s\n";
+      break;
+
+    case Mode::Log:
+      // Verify every incoming signature and stamp the verdict into an
+      // Authentication-Results header — but never reject. This is the
+      // "monitor before enforce" stage; look for `dkim=fail` /
+      // `dkim=none` / `dkim=permerror` in delivered mail before flipping
+      // to permissive or reject.
+      conf += "\nMode             sv\n"
+              "AlwaysAddARHeader true\n";
+      break;
+
+    case Mode::Permissive:
+      // "DKIM is optional, but if you publish it it must be correct."
+      // A missing signature is accepted; a bad signature or an unknown/
+      // missing DKIM key means the sender is either misconfigured or
+      // forging and gets a hard bounce (5.7.20) or a soft tempfail if
+      // DKIM_KEYERROR_ACTION=tempfail.
+      conf += "\nMode             sv\n";
+      conf += "On-BadSignature  " + keyerror_action + "\n";
+      conf += "On-KeyNotFound   " + keyerror_action + "\n";
+      break;
+
+    case Mode::Reject:
+      // Full enforce: on top of permissive, every incoming mail must
+      // carry a valid DKIM signature. Only right for ingresses where
+      // every peer is known to sign.
+      conf += "\nMode             sv\n";
+      conf += "On-BadSignature  " + keyerror_action + "\n";
+      conf += "On-KeyNotFound   " + keyerror_action + "\n";
+      conf += "On-NoSignature   reject\n";
+      break;
+  }
+  write_file(CONF_RUNTIME, conf);
+}
+
+void
+write_hosts_file(const fs::path &path, const std::string &hosts_env) {
+  std::string content;
+  for (const auto &h : split_ws(hosts_env)) {
+    content += h;
+    content += '\n';
+  }
+  write_file(path, content);
 }
 
 int
@@ -232,12 +327,53 @@ int main(int argc, char *argv[]) try {
                 "*@" + domain + " " + selector + "._domainkey." + domain + "\n");
   }
 
-  write_trusted_hosts();
+  // TRUSTED_HOSTS → InternalHosts (sign path): senders here are treated as
+  // own users and their outgoing mail is signed via SigningTable.
+  const std::string trusted_hosts = env_or(
+      "TRUSTED_HOSTS",
+      "127.0.0.1 ::1 localhost 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16");
+  write_hosts_file(TRUSTED_HOSTS, trusted_hosts);
 
-  std::cerr << "**** Starting OpenDKIM (sign+verify) on port 10026 for: "
-            << domains_env << std::endl;
+  // ExternalIgnoreList (verify path) is deliberately kept loopback-only:
+  // every non-loopback sender's signature must actually be verified,
+  // otherwise a bad-signature or unknown-key mail from an RFC1918 client
+  // (test-runner, an internal relay, etc.) would slip through unchecked.
+  write_hosts_file(IGNORE_HOSTS, "127.0.0.1 ::1 localhost");
 
-  const char *exec_argv[] = {"opendkim", "-f", "-x", OPENDKIM_CONF, nullptr};
+  const Mode mode = parse_mode(env_or("DKIM_DMARC", "reject"));
+  const std::string keyerror_action = env_or("DKIM_KEYERROR_ACTION", "reject");
+  if (keyerror_action != "reject" && keyerror_action != "tempfail") {
+    throw std::runtime_error(
+        "DKIM_KEYERROR_ACTION must be reject or tempfail (got \"" +
+        keyerror_action + "\")");
+  }
+  const std::string authserv_id = env_or("AUTHSERV_ID", "mail.local");
+  const std::string nameservers = env_or("NAMESERVERS", "");
+  write_opendkim_conf(mode, keyerror_action, authserv_id, nameservers);
+
+  // If explicit nameservers are given, also overwrite /etc/resolv.conf so
+  // opendkim's libc resolver bypasses Docker's embedded 127.0.0.11 (which
+  // rewrites authoritative NXDOMAIN responses into SERVFAIL, breaking
+  // On-KeyNotFound). Best-effort — failure is not fatal (the container may
+  // have a bind-mounted, read-only resolv.conf in some setups).
+  if (!nameservers.empty()) {
+    std::string resolv;
+    for (const auto &ns : split_ws(nameservers)) {
+      resolv += "nameserver " + ns + "\n";
+    }
+    try { write_file("/etc/resolv.conf", resolv); }
+    catch (...) { std::cerr << "**** WARNING: could not rewrite /etc/resolv.conf\n"; }
+  }
+
+  const char *mode_str =
+      mode == Mode::Off        ? "off (sign only, no verify)" :
+      mode == Mode::Log        ? "log (verify, add A-R, never reject)" :
+      mode == Mode::Permissive ? "permissive (reject bad/unknown-key, accept unsigned)"
+                               : "reject (strict: reject bad/unknown-key/unsigned)";
+  std::cerr << "**** Starting OpenDKIM in mode=" << mode_str
+            << " on port 10026 for: " << domains_env << std::endl;
+
+  const char *exec_argv[] = {"opendkim", "-f", "-x", CONF_RUNTIME, nullptr};
   execv(OPENDKIM, const_cast<char *const *>(exec_argv));
   std::perror(OPENDKIM);
   return 1;

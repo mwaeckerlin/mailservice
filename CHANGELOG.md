@@ -3,16 +3,159 @@
 All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [2.0.0]
+
+### ⚠️ BREAKING — please read before upgrading
+
+**If your existing `docker-compose.yml` does NOT include `opendkim` or
+`opendmarc` services** (typical for older installs), a plain image pull
+is fully backward-compatible: `postfix/start.sh` only wires the milters
+into the chain when the `OPENDKIM` / `OPENDMARC` env vars are set, and
+both default to empty. Your postfix keeps its previous milter chain
+(usually just `postgrey`), no legitimate mail can be bounced by
+DKIM/DMARC because there is no DKIM/DMARC verification running. To
+actually add DKIM/DMARC to such a stack, see the «Adding DKIM + DMARC
+to an existing compose file» section in `README.md` — always start with
+`DKIM_DMARC: log`.
+
+**If your existing `docker-compose.yml` DOES include `opendkim`** (or
+you copy the repo's `docker-compose.yml`), the DKIM/DMARC enforcement
+knobs have been unified. Anyone upgrading a running mailservice
+**must decide explicitly** whether they want the new strict verification
+behavior, or want to try it first without risking any legitimate mail
+being bounced.
+
+- The old env vars are **gone**: `DKIM_ENFORCE`, `DKIM_REJECT_ON_KEY_ERROR`
+  (never released but existed on `master`), and the implicit
+  «always reject bad/unknown-key» hard-wired into opendkim.
+- One new env var takes their place on both `opendkim` and `opendmarc`:
+  `DKIM_DMARC` with four levels — `off`, `log`, `permissive`, `reject`.
+- **Image default is `reject`** (strict enforcement). Anyone who does a
+  blind `docker compose pull && up -d` therefore ends up in the strictest
+  mode and may bounce legitimate mail from senders with wonky DKIM/DMARC.
+- **The upgrade path is: set `DKIM_DMARC: log` on both services first**,
+  watch delivered mail for `Authentication-Results: … dkim=fail`,
+  `dkim=none`, `dmarc=fail (p=… dis=none)` headers for a few days, and
+  only then escalate to `permissive` or `reject`. See the new
+  «Upgrade & Monitoring» section in `README.md` for the exact commands
+  and log/header patterns to watch.
+- The prod `docker-compose.yml` in this repo now ships with an explicit
+  `DKIM_DMARC: log` on both milter services and a comment explaining the
+  escalation path — so a fresh clone starts in log mode, not reject.
 
 ### Added
 
+- **Single DKIM/DMARC-mode knob `DKIM_DMARC`** on both opendkim and
+  opendmarc, four levels — `off` (no verify, no A-R stamping),
+  `log` (verify + stamp Authentication-Results, never reject — the
+  monitor mode operators run for a few days after upgrading),
+  `permissive` (opendkim rejects bad signatures and unknown DKIM keys,
+  accepts unsigned; opendmarc rejects on `p=reject` hard fail — the
+  intended production semantic: DKIM is optional but must be correct if
+  the sender publishes it) and `reject` (adds «reject unsigned» on
+  opendkim on top of permissive). Both containers must be set to the
+  same value or DMARC alignment breaks.
+- **`DKIM_KEYERROR_ACTION`** env on opendkim: `reject` (default) sends
+  the sender an immediate `550 5.7.20`; `tempfail` returns a 4xx so the
+  sender-side MX retries for its usual timeout (~5 days) — useful during
+  a DKIM key rotation where a legitimate sender may briefly publish a
+  new selector before DNS propagation is complete. Only takes effect
+  when `DKIM_DMARC` is `permissive` or `reject`.
+- **e2e stack:** third `opendkim` / `opendmarc` / `postfix` triple
+  wired to `DKIM_DMARC=log` (`postfix-log`) so the log-mode behavior
+  is covered by real end-to-end tests.
+- **`tests/dkim-dmarc-mode.sh`**: config-level test that starts opendkim
+  and opendmarc briefly in each of the four modes and asserts the
+  runtime `opendkim.conf` / `opendmarc.conf` contains (or omits) the
+  expected directives.
+
+- **Image contract**: the shipped images are now checked automatically for
+  being headless — no shell, no bash, no busybox, no perl. Whoever gains code
+  execution inside a container finds no tool there to go further. Covered so
+  far: opendkim, opendmarc, postfixadmin, postfixadmin-proxy and both
+  SnappyMail images. postfix, dovecot, postgrey, smtp-relay, smtp-relay-tls
+  and mailforward still start through a shell script and therefore still ship
+  a shell; they join the contract once their entrypoint is a binary.
+
+- **README** (Design philosophy): new «Reject reasons — end-user first,
+  then the admin» subsection — every SMTP reject should tell the sender
+  in plain language what happened, followed by the technical hint an
+  operator needs to fix the misconfig. Feature: the milter reject
+  templates will be aligned to this in a follow-up.
+- **OpenDMARC service** (`opendmarc/`): new milter that enforces DMARC on
+  incoming mail. Runs after opendkim in the milter chain, consumes
+  opendkim's `Authentication-Results` (via shared `AUTHSERV_ID`), does its
+  own SPF check via `libspf2`, and **rejects at SMTP time** on a hard
+  DMARC fail against a sender that publishes `_dmarc … p=reject`. Fills
+  the gap opendkim alone cannot cover: mail from a DMARC-protected sender
+  that arrives entirely unsigned is now rejected even without
+  `DKIM_ENFORCE=yes`. Same shell-free three-stage image as opendkim
+  (`init.cpp` compiled statically → `tar cph+ldd` collect →
+  `mwaeckerlin/scratch`, no shell/perl/busybox in the runtime).
+  Configurable via `AUTHSERV_ID` (must match opendkim) and `TRUSTED_HOSTS`
+  (RFC1918 + loopback by default, skips DMARC for own users). Wired in
+  by default in `docker-compose.yml` via `OPENDMARC: opendmarc` on
+  postfix; postfix appends it as a milter after opendkim.
 - **OpenDKIM multi-domain support** (`opendkim/`): new `DOMAINS` environment
   variable (space-separated list) generates and manages one 2048-bit RSA DKIM
   key per domain, prints one DNS TXT record per domain on first start, and
   signs `From:` addresses of every listed domain with the matching key. Adding
   a domain later reuses existing keys (only the new key is generated). The old
   `DOMAIN` (singular) variable is kept as the single-domain fallback.
+- **OpenDKIM verification tightened by default** (`opendkim/`): incoming mail
+  with a bad signature (`On-BadSignature`) or a signature referencing a DKIM
+  key that does not exist in DNS (`On-KeyNotFound`) is now **rejected** at
+  SMTP time — **always**, independent of `DKIM_ENFORCE`. DKIM in DNS is not
+  optional once a sender publishes it; a mis-signed or unknown-key mail is
+  either misconfigured or forged and never silently delivered.
+- **OpenDKIM AUTHSERV_ID + NAMESERVERS env vars** (`opendkim/`): new
+  `AUTHSERV_ID` sets the `AuthservID` in every `Authentication-Results`
+  header — **must match opendmarc's `AUTHSERV_ID`** so opendmarc trusts
+  opendkim's `dkim=` verdict when deciding DMARC alignment. Also new
+  `NAMESERVERS` (space-separated list) is written into `Nameservers`
+  and (as fallback) into `/etc/resolv.conf` at start-up so operators
+  can bypass a mangled container resolver (e.g. `NAMESERVERS: "1.1.1.1"`
+  in a Docker Swarm where the embedded resolver rewrites NXDOMAIN into
+  SERVFAIL).
+- **OpenDKIM InternalHosts / ExternalIgnoreList split** (`opendkim/`):
+  `TRUSTED_HOSTS` env now maps only to `InternalHosts` (sign path);
+  `ExternalIgnoreList` is hard-wired to loopback so a non-loopback
+  sender's incoming DKIM signature is always verified, even if the
+  same sender's outgoing mail is signed via `InternalHosts`.
+- **OpenDKIM enforce mode** (`opendkim/`): new `DKIM_ENFORCE` environment
+  variable — when set to `yes`, **unsigned** incoming mail is also rejected
+  (`On-NoSignature reject`) on top of the always-on bad/unknown-key rejects
+  above. Default `no` accepts unsigned mail (right for a public-facing MX
+  that must not bounce mail from small senders that don't publish DKIM at
+  all); `yes` is right for an ingress where every peer is known to sign.
+- **OpenDKIM InternalHosts override** (`opendkim/`): new `TRUSTED_HOSTS`
+  environment variable (space-separated hosts/CIDRs, default =
+  loopback + RFC1918) exposes `InternalHosts`/`ExternalIgnoreList` for
+  per-instance tightening — e.g. an enforce ingress can trust only loopback so
+  that RFC1918 senders are actually verified.
+- **E2E tests** (`tests/`):
+  - `test_dkim_multidomain_sign.py`: two new tests prove that mail from a
+    second signing domain (`@other.local`) gets a DKIM-Signature with
+    `d=other.local`, and that adding the second domain does not break signing
+    for the original one.
+  - `test_dkim_verify.py`: four new tests prove the full DKIM verify matrix
+    on a receiving instance — correctly signed → accept + `dkim=pass`;
+    unsigned + `DKIM_ENFORCE=no` → accept; unsigned + `DKIM_ENFORCE=yes` →
+    reject at SMTP time (mail never lands in INBOX); tampered signature +
+    `DKIM_ENFORCE=yes` → reject. Signs with `dkimpy` as an external sender
+    on `external.local`; matching public key published in the test dnsmasq
+    zone; private key committed at `tests/e2e/testkeys/` (test key only).
+  - `tests/image-contract.sh`: image-level contract tests, run by
+    `run-e2e.sh` after `docker compose build` and before starting the stack —
+    hard-fails the run if the shipped opendkim image contains `/bin/sh`,
+    `/usr/bin/perl` or `/bin/busybox`, or if the multi-domain init does not
+    generate both DNS records for `DOMAINS="alpha.local beta.local"`.
+  - `opendkim-strict` + `postfix-strict` services added to the e2e stack for
+    the enforce-mode tests; DKIM key + DNS records for `external.local` and
+    a second signing zone for `other.local` added to `dns/dnsmasq.conf`;
+    `dkimpy` added to the Playwright image; DKIM-related whitelist entries
+    added to `tests/e2e/greylist.conf` so the new senders are not delayed
+    by the greylist milter's tempfail.
 - **README** (SPF, DKIM, DMARC): new «Multi-domain» subsections show how one
   mailservice serves several sending domains — SPF via `include:` chaining,
   DKIM via `DOMAINS=` and one DNS record per domain, DMARC via one
