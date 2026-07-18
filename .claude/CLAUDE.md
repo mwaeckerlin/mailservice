@@ -44,6 +44,16 @@ Full statement: README.md «Design philosophy: reliability over filtering».
   suite green on a FRESH stack (`down -v` first; warm stacks carry greylist/
   autowhite state and produce phantom results).
 
+## dovecot pitfalls
+
+- **Never set or clear `auth_username_chars`** in the dovecot config: an
+  emptied character list is the precondition for the SQL auth bypass
+  CVE-2026-24031 (and the LDAP filter injection CVE-2026-27860). The
+  built-in default filters `'` out of usernames — leave it alone.
+- **Auth debug logging only via `DOVECOT_DEBUG_AUTH=yes`** (start.sh
+  writes `conf.d/10-debug.conf`); never bake `log_debug` into
+  `local.conf` — that is a production default seen by every log reader.
+
 ## Config migrations & component replacements
 
 On any config port across a major version, preserve the on-disk data layout

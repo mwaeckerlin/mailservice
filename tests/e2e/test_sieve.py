@@ -52,6 +52,15 @@ def _imap_search(subject: str, mailbox: str, retries: int = 15) -> bool:
     return False
 
 
+def test_sieve_cleartext_auth_refused_without_tls():
+    """Security invariant (auth_allow_cleartext=no): AUTHENTICATE on the
+    unencrypted ManageSieve channel is refused, so a password can never
+    travel in the clear — even with valid credentials."""
+    with ManageSieveClient(DOVECOT, SIEVE_P, use_tls=False) as ms:
+        with pytest.raises(ManageSieveError):
+            ms.authenticate(ALICE, ALICE_PW)
+
+
 @pytest.fixture(autouse=True)
 def cleanup_script():
     """Remove the test script before and after each test."""

@@ -4,7 +4,20 @@ encrypted connection."""
 import poplib
 import time
 import pytest
-from conftest import POP3_P, ALICE, ALICE_PW, smtp_send, pop3_stls
+from conftest import DOVECOT, POP3_P, ALICE, ALICE_PW, smtp_send, pop3_stls
+
+
+def test_pop3_cleartext_login_refused_without_stls():
+    """Security invariant (auth_allow_cleartext=no): USER/PASS on the
+    unencrypted channel is refused, so a password can never travel in
+    the clear — even with valid credentials."""
+    conn = poplib.POP3(DOVECOT, POP3_P)
+    try:
+        with pytest.raises(poplib.error_proto):
+            conn.user(ALICE)
+            conn.pass_(ALICE_PW)
+    finally:
+        conn.quit()
 
 
 def test_pop3_login():

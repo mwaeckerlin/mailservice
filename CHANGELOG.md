@@ -3,6 +3,25 @@
 All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [3.0.1]
+
+### Security
+- `dovecot`: verbose auth debug logging is no longer baked into the
+  image — it is off by default and only enabled by the new
+  `DOVECOT_DEBUG_AUTH=yes` diagnostics override (the e2e stack sets it
+  to keep failure logs verbose).
+- `dovecot`: the forced-TLS login invariant is now pinned by e2e
+  tests — cleartext authentication on an unencrypted connection is
+  proven to be refused for IMAP, POP3 and ManageSieve.
+- `dovecot`: the root run-mode of the container and the trust model of
+  the internal LMTP/SASL listeners are now documented as explicit
+  security trade-offs in the image README.
+
+### Changed
+- `dovecot`: image cleanup — removed unused environment leftovers,
+  modernized the Dockerfile (no more build warnings), completed the
+  declared ports (POP3, POP3S, ManageSieve).
+
 ## [3.0.0]
 
 ### ⚠️ BREAKING — mail filtering stack replaced

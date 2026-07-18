@@ -254,6 +254,9 @@ services:
       DB_PASSWORD:          testpass
       DB_NAME:              postfixadmin
       DOMAIN:               test.local
+      # diagnostics override (production default is no): auth debug lines
+      # feed the per-service log tail that run-e2e.sh prints on failure
+      DOVECOT_DEBUG_AUTH:   "yes"
       # no DEFAULT_PASS_SCHEME → dovecot default SHA512-CRYPT, matching
       # PostfixAdmin's php_crypt ($6$…) hashes stored in the shared database
     volumes:

@@ -28,6 +28,19 @@ def test_imap_wrong_password_rejected():
             conn.login(ALICE, "wrongpassword")
 
 
+def test_imap_cleartext_login_refused_without_tls():
+    """Security invariant (auth_allow_cleartext=no): on the unencrypted
+    channel dovecot advertises LOGINDISABLED and refuses LOGIN, so a
+    password can never travel in the clear — even with valid credentials."""
+    with imaplib.IMAP4(DOVECOT, IMAP_P) as conn:
+        assert "LOGINDISABLED" in conn.capabilities, (
+            "dovecot did not advertise LOGINDISABLED on the plain channel "
+            "— cleartext auth appears to be allowed"
+        )
+        with pytest.raises(imaplib.IMAP4.error):
+            conn.login(ALICE, ALICE_PW)
+
+
 def test_imap_mail_delivered_to_inbox(unique_subject):
     """Mail sent via SMTP appears in the recipient's INBOX."""
     smtp_send(unique_subject)
