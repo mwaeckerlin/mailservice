@@ -44,9 +44,16 @@ Full statement: README.md «Design philosophy: reliability over filtering».
   suite green on a FRESH stack (`down -v` first; warm stacks carry greylist/
   autowhite state and produce phantom results).
 
-## Config migrations
+## Config migrations & component replacements
 
 On any config port across a major version, preserve the on-disk data layout
 (paths, storage schemes) or ship a data migration — see
 `tests/e2e/test_maildir_layout.py` and the Dovecot 2.4 regression in
 CHANGELOG.md.
+
+More generally, when replacing any component or mechanism: list the
+behavioural invariants of the old setup (e.g. "SASL-authenticated clients
+are never greylisted"), reproduce each one explicitly in the new setup and
+pin it with an e2e test; verify the semantics of every flag/option against
+the manual instead of assuming it — see the greylisting regression pinned
+by `tests/e2e/test_greylisting.py::test_authenticated_submission_not_greylisted`.
