@@ -12,9 +12,27 @@ Full statement: README.md «Design philosophy: reliability over filtering».
     internal networks stay whitelisted in milter-greylist. Never pass `-A` to
     milter-greylist (disables SMTP-AUTH whitelisting). Pinned by
     `tests/e2e/test_greylisting.py::test_authenticated_submission_not_greylisted`.
-- **Inbound:** Exactly two outcomes — delivered to INBOX, or rejected with an
-  informative SMTP error to the sender. No junk folder, no silent drop, no
-  quarantine. Sieve filters may only accept or reject.
+- **Inbound:** The mailservice default is exactly two outcomes — delivered
+  to INBOX, or rejected with an informative SMTP error to the sender. No
+  silent drop.
+  - Two additional delivery modes are available as **opt-in** for operators
+    who explicitly want the big-provider-style behaviour, both controlled by
+    the `SPAM_DELIVERY_MODE` env on the dovecot service:
+    - `mark` — deliver to INBOX, add `X-Spam-Flag: YES` and related
+      informational headers. **Never rewrite the subject**, never touch
+      the body — anything that would break the sender's DKIM signature
+      (or the ARC chain of an intermediate hop) is forbidden. The user's
+      MUA can filter on the added headers client-side.
+    - `folder` — deliver to the recipient's IMAP `Junk` folder via a
+      server-side sieve rule (`X-Spam-Flag: YES` → `fileinto "Junk"`).
+      This is a silent quarantine and is explicitly **not recommended**,
+      but supported for admins who ask for it.
+  - Default is `reject`. Anything above `RSPAMD_REJECT_SCORE` is rejected
+    at SMTP time regardless of `SPAM_DELIVERY_MODE` — the mode only
+    controls what happens to borderline mail (between add-header score
+    and reject score) that was accepted at SMTP time.
+  - Server-side sieve for the `folder` mode may only route the message —
+    accept, reject, or fileinto. No transformation of the mail body.
 
 ## milter-greylist pitfalls (learned from incidents)
 
