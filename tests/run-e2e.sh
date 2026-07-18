@@ -25,14 +25,16 @@ docker volume create mailservice-e2e-clamav-db >/dev/null
 docker compose -f "$COMPOSE" build --quiet
 
 echo "==> Running image contract tests..."
-# postfix, dovecot, smtp-relay(-tls) and mailforward still boot via a
-# shell script and therefore still ship a shell — they join the
-# contract once their entrypoint is a binary, like rspamd/clamav's
-# compiled inits. (redis is foreign — its headless contract is verified
-# in the mwaeckerlin/redis repository, not here.)
+# Every own image in the stack is headless — a compiled init is the
+# entrypoint, no shell, no busybox, no perl. (redis is foreign — its
+# headless contract is verified in the mwaeckerlin/redis repository,
+# not here.)
 bash tests/image-contract.sh \
     e2e-rspamd e2e-rspamd-strict e2e-rspamd-log \
     e2e-clamav \
+    e2e-postfix e2e-postfix-strict e2e-postfix-log \
+    e2e-dovecot \
+    e2e-smtp-relay e2e-smtp-relay-tls e2e-mailforward \
     e2e-postfixadmin e2e-postfixadmin-proxy e2e-snappymail e2e-snappymail-proxy
 bash tests/snappymail-gnupg.sh e2e-snappymail
 
@@ -42,6 +44,7 @@ docker compose -f "$COMPOSE" up -d --remove-orphans \
     rspamd rspamd-strict rspamd-log \
     postfix postfix-strict postfix-log \
     dovecot dns fake-smtp \
+    smtp-relay smtp-relay-tls mailforward \
     postfixadmin-db postfixadmin postfixadmin-proxy \
     snappymail snappymail-proxy
 
@@ -55,7 +58,8 @@ if [[ $EXIT -ne 0 ]]; then
     # (dovecot) crowd out the decision logs of the others
     for svc in postfix postfix-strict postfix-log \
                rspamd rspamd-strict rspamd-log \
-               redis clamav dovecot; do
+               redis clamav dovecot \
+               smtp-relay smtp-relay-tls mailforward; do
         echo "---- ${svc} ----"
         docker compose -f "$COMPOSE" logs --tail 120 "$svc" 2>&1
     done

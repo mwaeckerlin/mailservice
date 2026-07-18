@@ -188,6 +188,9 @@ services:
       DB_NAME:        postfixadmin
       DISABLE_DNSBL:  "yes"
       MYNETWORKS:     "127.0.0.0/8"
+      # diagnostics override (production default is 0): TLS handshake
+      # logs feed the per-service log tail run-e2e.sh prints on failure
+      POSTFIX_TLS_LOGLEVEL: "2"
     dns: ["10.100.0.2"]
     volumes:
       - letsencrypt:/etc/letsencrypt:ro
@@ -212,6 +215,7 @@ services:
       DB_NAME:        postfixadmin
       DISABLE_DNSBL:  "yes"
       MYNETWORKS:     "127.0.0.0/8"
+      POSTFIX_TLS_LOGLEVEL: "2"
     dns: ["10.100.0.2"]
     volumes:
       - letsencrypt:/etc/letsencrypt:ro
@@ -236,6 +240,7 @@ services:
       DB_NAME:        postfixadmin
       DISABLE_DNSBL:  "yes"
       MYNETWORKS:     "127.0.0.0/8"
+      POSTFIX_TLS_LOGLEVEL: "2"
     dns: ["10.100.0.2"]
     volumes:
       - letsencrypt:/etc/letsencrypt:ro
@@ -268,12 +273,60 @@ services:
       certs-init:      { condition: service_completed_successfully }
     networks: [mail, antispam, db-net]
 
-  # foreign image — built and tested in its own repository
+  # foreign image — built and tested in its own repository. The fixed
+  # dns-net address makes it the MX target of extern.local (see
+  # dns/dnsmasq.conf), so the mailforward e2e can assert a real
+  # virtual-alias forward: mailforward → MX lookup → fake-smtp.
   fake-smtp:
     image: mwaeckerlin/fake-smtp
     volumes:
       - fake-mails:/mails
+    networks:
+      mail:
+      dns-net:
+        # high in the /24 so it can never collide with the dynamic
+        # addresses docker hands out to the other dns-net services
+        ipv4_address: 10.100.0.99
+
+  # ────────────────────────────────────────────────────────────────────────
+  # Relay family — the generic postfix images the mailservice postfix
+  # builds on (smtp-relay → mailforward → postfix, smtp-relay →
+  # smtp-relay-tls). All are mailservice submodules, so this TEST compose
+  # may build them via `../../<name>` (project-internal). The tests pin
+  # the behavioural invariants (banner, EHLO, STARTTLS, virtual-alias
+  # forwarding) that the headless migration must preserve.
+  # ────────────────────────────────────────────────────────────────────────
+
+  smtp-relay:
+    build: ../../smtp-relay
     networks: [mail]
+
+  smtp-relay-tls:
+    build: ../../smtp-relay-tls
+    environment:
+      MAILHOST: test.local        # cert path under /etc/letsencrypt/live/
+    volumes:
+      - letsencrypt:/etc/letsencrypt:ro
+    depends_on:
+      certs-init: { condition: service_completed_successfully }
+    networks: [mail]
+
+  mailforward:
+    build: ../../mailforward
+    environment:
+      MAILHOST: fwd.local
+      # forward@fwd.local is forwarded to sink@extern.local, whose MX
+      # (dns/dnsmasq.conf) points at fake-smtp — a real end-to-end
+      # forward the test asserts by reading fake-smtp's mail store.
+      MAPPINGS: "forward@fwd.local sink@extern.local"
+      # the isolated e2e resolver cannot answer the RBL zones — every
+      # lookup would stall the SMTP dialogue until the resolver timeout
+      DISABLE_DNSBL: "yes"
+    dns: ["10.100.0.2"]
+    depends_on:
+      dns:       { condition: service_healthy }
+      fake-smtp: { condition: service_started }
+    networks: [mail, dns-net]
 
   # Single shared database for PostfixAdmin, Postfix and Dovecot (mirrors the
   # production stack). Accounts are created through PostfixAdmin, not pre-seeded.
@@ -357,6 +410,9 @@ services:
       dovecot:            { condition: service_started }
       postfixadmin-proxy: { condition: service_started }
       snappymail-proxy:   { condition: service_started }
+      smtp-relay:         { condition: service_started }
+      smtp-relay-tls:     { condition: service_started }
+      mailforward:        { condition: service_started }
     environment:
       POSTFIX_HOST:        postfix
       POSTFIX_STRICT_HOST: postfix-strict
@@ -383,9 +439,17 @@ services:
       SETUP_PASS:         test123
       SM_ADMIN_USER:      "admin"
       SM_ADMIN_PASS:      "12345"
+      SMTP_RELAY_HOST:     smtp-relay
+      SMTP_RELAY_TLS_HOST: smtp-relay-tls
+      MAILFORWARD_HOST:    mailforward
+      FWD_ADDRESS:         forward@fwd.local
+      FWD_UNMAPPED:        nobody@fwd.local
+      FAKE_MAILS_DIR:      /fake-mails
     volumes:
       # read the dovecot maildir store to assert the on-disk mailbox layout
       - maildata:/var/mail/domains:ro
+      # read fake-smtp's mail store to assert the mailforward forward
+      - fake-mails:/fake-mails:ro
       # DKIM test key used by the verify tests to sign as external.local; the
       # matching public key is published in dns/dnsmasq.conf
       - ./testkeys:/testkeys:ro

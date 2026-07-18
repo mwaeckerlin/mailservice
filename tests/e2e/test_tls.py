@@ -3,8 +3,8 @@
 The e2e `certs-init` container drops a throw-away self-signed cert into
 the `letsencrypt` volume at the exact path postfix/dovecot look for
 (`/etc/letsencrypt/live/test.local/`). That flips on:
-  - STARTTLS on the SMTP port (postfix start.sh: smtpd_use_tls=yes),
-  - IMAPS on 993 and STARTTLS on 143 (dovecot start.sh: ssl=yes).
+  - STARTTLS on the SMTP port (postfix init: smtpd_use_tls=yes),
+  - IMAPS on 993 and STARTTLS on 143 (dovecot init: ssl=yes).
 
 These are the production TLS paths that a plaintext stack cannot show.
 The cert is self-signed, so every TLS handshake here uses a
@@ -34,7 +34,7 @@ def _insecure_ctx() -> ssl.SSLContext:
 
 def test_smtp_starttls_offered_and_negotiates():
     """postfix advertises STARTTLS on the SMTP port and the handshake
-    completes — proves the cert-present branch of start.sh enabled TLS."""
+    completes — proves the cert-present branch of init enabled TLS."""
     with smtplib.SMTP(POSTFIX, SMTP_P, timeout=15) as s:
         code, _ = s.ehlo(f"testhost.{DOMAIN}")
         assert code == 250

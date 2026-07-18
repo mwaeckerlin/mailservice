@@ -140,6 +140,10 @@ services:
     build: mailforward
     environment:
       LOCAL_DOMAINS: "merkur.mrw.sh localhost demo test lokal extern"
+    volumes:
+      - type: volume
+        source: mailforward-spool   # accepted-but-undelivered forwards
+        target: /var/spool/postfix
 
   dovecot:
     image: mwaeckerlin/dovecot
@@ -203,11 +207,17 @@ services:
       DB_USER: postfixadmin
       DB_PASSWORD: eepaiph3ohquai2Eilae-change-it
       DB_HOST: postfixadmin-db
-      # CHECK_SPF auto-disables when RSPAMD is set — rspamd's SPF
-      # module handles it; running postfix-policyd-spf-perl in
-      # parallel would double the work and can produce contradictory
-      # verdicts. Override with CHECK_SPF=yes if you want the
-      # policy-service path anyway.
+      # SPF is verified by rspamd's SPF module (see the rspamd
+      # service above) — the perl-based policy service of v2.x is
+      # gone from the headless image.
+    volumes:
+      # The queue MUST persist: postfix answers 250 once a mail is
+      # fsync'ed into the queue — the sender never retries after that.
+      # Without this volume a deferred mail silently vanishes on every
+      # container recreate / image update.
+      - type: volume
+        source: postfix-spool
+        target: /var/spool/postfix
     networks:
       - postfix-backend
       - antispam                    # postfix ⇔ rspamd milter
@@ -223,3 +233,5 @@ volumes:
   dkim-keys:                        # rspamd's /var/lib/rspamd/dkim/
   redis-data:                       # Bayes / greylist / ratelimit state
   clamav-db:                        # virus signatures
+  postfix-spool:                    # mail queue — accepted mail never vanishes
+  mailforward-spool:                # mail queue of the forwarder

@@ -50,9 +50,10 @@ Full statement: README.md «Design philosophy: reliability over filtering».
   emptied character list is the precondition for the SQL auth bypass
   CVE-2026-24031 (and the LDAP filter injection CVE-2026-27860). The
   built-in default filters `'` out of usernames — leave it alone.
-- **Auth debug logging only via `DOVECOT_DEBUG_AUTH=yes`** (start.sh
-  writes `conf.d/10-debug.conf`); never bake `log_debug` into
-  `local.conf` — that is a production default seen by every log reader.
+- **Auth debug logging only via `DOVECOT_DEBUG_AUTH=yes`** (the
+  compiled init writes `conf.d/10-debug.conf`); never bake `log_debug`
+  into `local.conf` — that is a production default seen by every log
+  reader.
 
 ## Config migrations & component replacements
 

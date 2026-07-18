@@ -102,6 +102,14 @@ This stack is composed of independently maintained images:
 - ClamAV (antivirus) — https://github.com/mwaeckerlin/clamav
 - Redis (Bayes / greylist / ratelimit state, headless) — https://github.com/mwaeckerlin/redis
 - SnappyMail webmail — see [Frontend: SnappyMail](#frontend-snappymail-web-mailer)
+- SMTP relay family (standalone relays this stack's postfix builds on) —
+  https://github.com/mwaeckerlin/smtp-relay,
+  https://github.com/mwaeckerlin/smtp-relay-tls,
+  https://github.com/mwaeckerlin/mailforward
+
+Every own image in the stack is **headless**: a compiled `init` binary
+is the entrypoint; there is no shell, no busybox and no perl in any
+shipped image (pinned by `tests/image-contract.sh`).
 
 ### Upgrading PostfixAdmin
 
@@ -139,6 +147,19 @@ page access; trigger it once:
   ```
 
 The database user needs `ALTER`/`CREATE` privileges for the upgrade to succeed.
+
+### Mail queue persistence
+
+Postfix answers `250 Ok` as soon as a mail is safely written (fsync)
+into its queue — from that moment the server owns delivery and the
+sender never retries. A deferred mail (receiver greylisting, dovecot
+briefly down, remote MX unreachable) can sit in the queue for hours or
+days. The compose file therefore maps `/var/spool/postfix` of every
+postfix-based service to a **named volume** (`postfix-spool`,
+`mailforward-spool`) — without it, a container recreate or image
+update silently destroys accepted-but-undelivered mail.
+`tests/compose-contract.sh` pins this: the suite fails if the queue
+volume is ever removed.
 
 ### Authentication over TLS (secure default)
 
@@ -219,10 +240,9 @@ SPF lets receiving servers verify that inbound mail claiming to come from your d
 
 Rspamd's SPF module runs against every incoming mail and stamps the
 result into `Authentication-Results:`. The verdict feeds into DMARC
-alignment. Postfix's `CHECK_SPF` auto-disables when `RSPAMD` is set —
-running the old `postfix-policyd-spf-perl` in parallel would produce
-contradictory verdicts. Override with `CHECK_SPF: "yes"` if you want
-the policy-service path back for a specific reason.
+alignment. The old perl-based `postfix-policyd-spf-perl` (and its
+`CHECK_SPF` knob) is gone from the headless postfix image — it
+duplicated rspamd's verdict and could contradict it.
 
 **Outgoing DNS record**
 
@@ -741,21 +761,31 @@ Dovecot 2.4's MySQL client requires TLS for the database connection, so
 `dovecot` → database connection works. With an older MariaDB that offers no TLS
 (e.g. 10.x) Dovecot fails with *"SSL is required, but the server does not
 support it"*; in that case set `ssl = no` in Dovecot's MySQL passdb block
-(`dovecot/start.sh`, inside `mysql { … }`).
+(`dovecot/init.cpp` writes it to `conf.d/passdb-sql.conf`, inside
+`mysql { … }`).
 
 ## Development
 
 ### Image dependency chain
 
-The images are layered — each builds on the previous:
+The images are layered — each inherits the accumulated postfix
+configuration (`main.cf`) of its parent:
 
 ```
-mwaeckerlin/very-base
+mwaeckerlin/very-base (build stages)
   └── mwaeckerlin/smtp-relay        simple open relay (for other apps: Nextcloud, Gitea…)
         ├── mwaeckerlin/smtp-relay-tls    same, with TLS support
         └── mwaeckerlin/mailforward       mail forwarder (no own mailbox)
               └── mwaeckerlin/postfix     full mail server ← core of this stack
 ```
+
+All images are **headless**: the build stage (from `very-base`, which
+still has the package manager) installs postfix, copies the parent
+image's `main.cf` and layers its own settings on top; the shipped
+scratch image contains only the daemon, its libraries, the config and
+a compiled `init` entrypoint — no shell, no busybox, no perl. The
+`tests/image-contract.sh` suite pins this for every image in the
+stack.
 
 `smtp-relay` and `smtp-relay-tls` are also published as standalone images for use by other Docker services that need an SMTP server without the full mailservice stack.
 

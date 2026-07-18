@@ -3,6 +3,75 @@
 All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [3.1.0]
+
+### Changed — every image in the stack is now headless
+
+`postfix`, `dovecot`, `smtp-relay`, `smtp-relay-tls` and `mailforward`
+now follow the same pattern as `rspamd`, `clamav` and `redis`: a
+compiled C++ `init` binary configures the service from the environment
+and execs the daemon — the shipped images contain **no shell, no
+busybox, no perl and no package manager**. An attacker who reaches
+code execution in any container finds nothing to pivot with. All
+environment knobs and the on-disk data layouts are unchanged; the
+whole e2e suite plus new relay-family tests pin the behaviour.
+
+- The postfix family images inherit the accumulated `main.cf` from
+  their parent image at build time (`smtp-relay` → `mailforward` →
+  `postfix`); each build stage installs postfix fresh and layers its
+  deltas on top.
+- Every image now offers `init --healthcheck` (TCP probe of its main
+  listener) for Docker healthchecks; mailforward's old bash/telnet
+  `health.sh` is gone.
+- The dovecot Bayes-autotrainer wrappers `report-spam` / `report-ham`
+  are one static binary execing `rspamc` — same paths, same sieve
+  contract as the former shell wrappers.
+- The relay family (`smtp-relay`, `smtp-relay-tls`, `mailforward`)
+  gets the same high, configurable delivery limits as postfix:
+  `MESSAGE_SIZE_LIMIT` (default 100 GiB, was postfix's 10 MB default)
+  and `SMTP_HARD_ERROR_LIMIT` (default 20; mailforward previously
+  hardcoded 1, which turned a single rejected recipient into an
+  abrupt disconnect).
+- The relay family also gets postfix's `DISABLE_DNSBL` switch: strips
+  the DNS-blocklist lookups from the smtpd restrictions for
+  test/offline stacks whose resolver cannot answer the blocklist
+  zones (each lookup stalled the SMTP dialogue until the resolver
+  timeout).
+
+### Fixed
+- `mailforward`: the virtual alias map works again on current Alpine —
+  alpine builds postfix without Berkeley DB, so the historical `hash:`
+  map type no longer exists and every alias recipient drew a 451
+  temporary failure. The map is now compiled and looked up as `lmdb:`
+  (alpine's default type). Pinned by the new end-to-end forward test.
+- **The mail queue is now persistent.** Postfix answers `250 Ok` as
+  soon as a mail is fsync'ed into its queue — from that moment the
+  server owns delivery and the sender never retries; a deferred mail
+  can sit in the queue for hours or days. `/var/spool/postfix` was
+  never a volume (in any previous version), so every container
+  recreate or image update silently destroyed
+  accepted-but-undelivered mail. All postfix-based images now declare
+  the queue as a volume, the compose maps named volumes
+  (`postfix-spool`, `mailforward-spool`), and the new
+  `tests/compose-contract.sh` fails the suite if the mapping is ever
+  removed.
+- The image contract test now covers **all** own images of the stack
+  (previously only rspamd, clamav, postfixadmin(+proxy), snappymail).
+- New e2e tests pin the relay-family invariants: SMTP banner/EHLO,
+  STARTTLS handshake on smtp-relay-tls, and a real end-to-end
+  mailforward virtual-alias forward delivered via MX lookup to the
+  test sink — plus a permanent 5xx for unmapped alias recipients.
+
+### Removed
+- `postfix`: the perl-based `postfix-policyd-spf-perl` and its
+  `CHECK_SPF` knob (v3.0.0 had already unwired it by default) — SPF
+  verification is rspamd's SPF module.
+- `postfix`: baked-in debug settings (`debug_peer_list`, TLS handshake
+  loglevel 2). TLS logging is now `POSTFIX_TLS_LOGLEVEL` (default 0 —
+  production default; the e2e stack sets 2 for diagnosable logs).
+- `smtp-relay-tls`: the unused `DAYS` env; `postfix`: the unused
+  `LOCAL_DOMAINS` env.
+
 ## [3.0.1]
 
 ### Security
