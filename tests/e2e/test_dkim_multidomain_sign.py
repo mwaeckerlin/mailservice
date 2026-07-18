@@ -1,17 +1,16 @@
-"""Multi-domain DKIM signing.
+"""Multi-domain DKIM signing (v3.0.0 — via rspamd).
 
-opendkim is started with DOMAINS="test.local other.local", so mail with
-From: @other.local must be signed with the other.local key (d=other.local),
-not silently unsigned and not signed as test.local. Proves the multi-domain
-DOMAINS env var actually produces per-domain signatures.
+rspamd is started with DOMAINS="test.local other.local", so mail with
+From: @other.local must be signed with the other.local key
+(d=other.local), not silently unsigned and not signed as test.local.
+Proves rspamd's dkim_signing multi-map picks the per-domain key.
 """
 import email
 import imaplib
-import smtplib
 import time
 
 from conftest import (
-    POSTFIX, SMTP_P, DOVECOT, IMAP_P, ALICE, ALICE_PW, DOMAIN, build_message,
+    DOVECOT, IMAP_P, ALICE, ALICE_PW, DOMAIN, smtp_send, imap_starttls,
 )
 
 
@@ -31,18 +30,16 @@ def _wait_for_mail(conn: imaplib.IMAP4, subject: str, retries: int = 10):
 def test_multidomain_sign_from_second_domain(unique_subject):
     """A mail with From: @other.local gets a DKIM-Signature with d=other.local.
 
-    Sender is on the second signing domain (other.local); opendkim looks up
-    its SigningTable, matches *@other.local → other.local key, and signs
-    with d=other.local.
+    Sender is on the second signing domain (other.local); rspamd's
+    dkim_signing module resolves the From: domain against
+    /var/lib/rspamd/dkim/<domain>.<selector>.key and signs with the
+    per-domain key.
     """
     sender = f"otheralice@{OTHER_DOMAIN}"
     subject = unique_subject
-    with smtplib.SMTP(POSTFIX, SMTP_P) as s:
-        s.ehlo(f"testhost.{DOMAIN}")
-        s.sendmail(sender, [ALICE],
-                   build_message(subject, from_=sender, to=ALICE))
+    smtp_send(subject, from_=sender, to=ALICE)
 
-    with imaplib.IMAP4(DOVECOT, IMAP_P) as conn:
+    with imap_starttls() as conn:
         conn.login(ALICE, ALICE_PW)
         msgs = _wait_for_mail(conn, subject)
         assert msgs, f"Mail '{subject}' not delivered"
@@ -63,18 +60,17 @@ def test_multidomain_sign_from_second_domain(unique_subject):
 
 def test_multidomain_sign_from_first_domain_still_works(unique_subject):
     """Sanity: the first signing domain (test.local) is not broken by adding
-    a second domain — regression guard against a shrinking KeyTable.
+    a second domain — regression guard against a per-domain key lookup
+    that only sees one entry.
     """
-    # Fixed sender (whitelisted in tests/e2e/greylist.conf) so the greylist
-    # milter doesn't tempfail the RCPT on the first attempt.
+    # Clean mail is never greylisted under rspamd's score-based
+    # greylisting, so no sender whitelisting is needed here (v2 needed
+    # an entry in the old milter-greylist config for this sender).
     sender = f"dkimregress@{DOMAIN}"
     subject = unique_subject
-    with smtplib.SMTP(POSTFIX, SMTP_P) as s:
-        s.ehlo(f"testhost.{DOMAIN}")
-        s.sendmail(sender, [ALICE],
-                   build_message(subject, from_=sender, to=ALICE))
+    smtp_send(subject, from_=sender, to=ALICE)
 
-    with imaplib.IMAP4(DOVECOT, IMAP_P) as conn:
+    with imap_starttls() as conn:
         conn.login(ALICE, ALICE_PW)
         msgs = _wait_for_mail(conn, subject)
         assert msgs

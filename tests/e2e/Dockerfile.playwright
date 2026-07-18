@@ -1,5 +1,12 @@
 FROM mcr.microsoft.com/playwright/python:v1.60.0-jammy
 WORKDIR /tests
+# gnupg is needed by test_snappymail_gpg_verify.py to prove the
+# rainloop/Dockerfile's `gpg --verify` machinery works — positive
+# (signed) and negative (tampered / unknown-key) cases are all done
+# in-process, no docker build required.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gnupg \
+    && rm -rf /var/lib/apt/lists/*
 COPY requirements.playwright.txt ./
 RUN pip install --no-cache-dir -r requirements.playwright.txt
 COPY . .

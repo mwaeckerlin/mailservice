@@ -5,8 +5,10 @@ public key is published in dns/dnsmasq.conf at mail._domainkey.external.local;
 the private key is committed at tests/e2e/testkeys/external.local.mail.key
 (TEST key only — never used in production).
 
-The verification matrix across all three DKIM_DMARC modes covered by the
-e2e stack:
+The verification is done by rspamd's DKIM module and stamped into the
+`Authentication-Results:` header exactly like an RFC-8601-compliant
+downstream would expect (`dkim=pass|fail|permerror|none`). The matrix
+across the three `DKIM_DMARC` modes each e2e postfix routes through:
 
   postfix (permissive):
     1a. Correct signature                → accept, dkim=pass
@@ -21,29 +23,19 @@ e2e stack:
     L1. Bad signature                    → accept, dkim=fail  (never rejects)
     L2. No signature                     → accept, dkim=none  (never rejects)
 
-Notes on the semantic that is NOT directly tested here but IS in place
-(see opendkim.conf.base — `On-KeyNotFound reject`):
-
-  6. Signature present + DKIM public key missing in DNS → reject (always!)
-
-The Docker embedded resolver (127.0.0.11) that sits in front of any user-
-defined network rewrites *authoritative* NXDOMAIN responses from a
-container-local dnsmasq into SERVFAIL. opendkim interprets SERVFAIL as a
-temporary failure and applies `On-Default = tempfail` instead of firing
-`On-KeyNotFound`, so a purely-e2e reproduction never rejects. In real
-production (Docker Swarm forwarding to the host / internet resolver)
-NXDOMAIN passes through unchanged and `On-KeyNotFound reject` fires as
-intended — verified with
-`docker run --rm alpine nslookup mail._domainkey.this-does-not-exist.com`
-against a real internet resolver, which returns clean NXDOMAIN.
-
-The mechanism is indirectly guaranteed by:
-  - test_verify_bad_signature_always_rejected_even_without_enforce: proves
-    opendkim runs verify against RFC1918 senders and enforces On-* reject
-    directives (same code path);
-  - test_dmarc_rejects_unsigned_when_p_reject: proves the second-layer
-    protection — a sender publishing `p=reject` with an unknown/broken
-    DKIM key is caught by opendmarc even if opendkim's key lookup fails.
+Not directly tested here but in place: an unknown-key DKIM signature
+(the public key `<selector>._domainkey.<domain>` is missing in DNS)
+maps to `dkim=permerror` under rspamd; the DMARC module then rejects
+if the sender publishes `p=reject`. The Docker embedded resolver
+rewrites the container-local dnsmasq's authoritative NXDOMAIN into
+SERVFAIL, which rspamd (like opendkim before it) treats as a temporary
+failure — the reject path only fires against a real internet resolver
+where NXDOMAIN passes through unchanged. That mechanism is covered
+indirectly by test_verify_bad_signature_always_rejected_even_without_enforce
+(proves rspamd runs verify against RFC1918 senders and honours the
+reject action) and by test_dmarc_rejects_unsigned_when_p_reject (proves
+the second-layer DMARC catches a broken chain even if DKIM alone did
+not conclude).
 """
 import email
 import imaplib
@@ -56,7 +48,7 @@ import pytest
 
 from conftest import (
     POSTFIX, POSTFIX_STRICT, POSTFIX_LOG, SMTP_P, DOVECOT, IMAP_P,
-    ALICE, ALICE_PW,
+    ALICE, ALICE_PW, send_raw, imap_starttls,
 )
 
 
@@ -109,21 +101,15 @@ def _sign(raw: bytes, tamper: bool = False, selector: str = EXT_SELECTOR) -> byt
 
 def _send(host: str, raw: bytes, to: str = ALICE,
           sender_override: str | None = None) -> tuple[bool, str]:
-    """Return (accepted, error_text). accepted=False for 5xx during DATA."""
+    """Return (accepted, error_text). accepted=False for 5xx during
+    DATA; 4xx greylist tempfails are retried by send_raw like a real
+    MTA would."""
     sender = sender_override or EXT_SENDER
-    try:
-        with smtplib.SMTP(host, SMTP_P, timeout=15) as s:
-            s.ehlo(f"testhost.{EXT_DOMAIN}")
-            s.mail(sender)
-            s.rcpt(to)
-            code, resp = s.data(raw)
-            return (200 <= code < 400, f"{code} {resp!r}")
-    except smtplib.SMTPResponseException as e:
-        return (False, f"{e.smtp_code} {e.smtp_error!r}")
+    return send_raw(host, sender, to, raw, helo=f"testhost.{EXT_DOMAIN}")
 
 
 def _wait_for_mail(subject: str, retries: int = 10):
-    with imaplib.IMAP4(DOVECOT, IMAP_P) as conn:
+    with imap_starttls() as conn:
         conn.login(ALICE, ALICE_PW)
         for _ in range(retries):
             conn.select("INBOX")
@@ -164,9 +150,9 @@ def test_verify_correct_signature_accepted(subj):
 
 
 def test_verify_missing_signature_accepted_when_not_enforced(subj):
-    """Case 2: unsigned mail + DKIM_ENFORCE=no → accept, delivered.
-    Uses the default postfix (DKIM_ENFORCE=no); an ingress with no enforce
-    must never bounce an unsigned mail."""
+    """Case 2: unsigned mail + DKIM_DMARC=permissive → accept, delivered.
+    Uses the default postfix (rspamd DKIM_DMARC=permissive); permissive
+    mode never bounces an unsigned mail."""
     raw = _build_raw(subj)  # NOT signed
     accepted, resp = _send(POSTFIX, raw)
     assert accepted, (
@@ -178,7 +164,7 @@ def test_verify_missing_signature_accepted_when_not_enforced(subj):
 
 
 def test_verify_missing_signature_rejected_when_enforced(subj):
-    """Case 3: unsigned mail + DKIM_ENFORCE=yes → rejected at SMTP time,
+    """Case 3: unsigned mail + DKIM_DMARC=reject → rejected at SMTP time,
     NOT delivered to alice's INBOX.
 
     postfix's aggressive `smtpd_hard_error_limit=1` collapses the milter's
@@ -196,8 +182,8 @@ def test_verify_missing_signature_rejected_when_enforced(subj):
 
 
 def test_verify_bad_signature_rejected_when_enforced(subj):
-    """Case 4: tampered signature + DKIM_ENFORCE=yes → rejected at SMTP time,
-    NOT delivered to alice's INBOX."""
+    """Case 4: tampered signature + DKIM_DMARC=reject → rejected at SMTP
+    time, NOT delivered to alice's INBOX."""
     raw = _sign(_build_raw(subj), tamper=True)
     accepted, resp = _send(POSTFIX_STRICT, raw)
     assert not accepted, (
@@ -211,8 +197,9 @@ def test_verify_bad_signature_rejected_when_enforced(subj):
 
 def test_verify_correct_signature_accepted_by_default_postfix(subj):
     """Sanity: a correctly signed mail routed through the default postfix
-    (DKIM_ENFORCE=no) is accepted and stamped dkim=pass. Complements
-    test_verify_correct_signature_accepted which uses the strict postfix."""
+    (rspamd DKIM_DMARC=permissive) is accepted and stamped dkim=pass.
+    Complements test_verify_correct_signature_accepted which uses the
+    strict postfix."""
     raw = _sign(_build_raw(subj))
     accepted, resp = _send(POSTFIX, raw)
     assert accepted, f"Correctly signed mail was rejected on default postfix: {resp}"
@@ -225,14 +212,15 @@ def test_verify_correct_signature_accepted_by_default_postfix(subj):
 
 
 def test_verify_bad_signature_always_rejected_even_without_enforce(subj):
-    """Case 5: tampered signature routed through the DEFAULT postfix (no
-    enforce mode) is STILL rejected — DKIM in DNS is never optional once a
-    sender publishes it; a bad signature is always a bounce."""
+    """Case 5: tampered signature routed through the DEFAULT postfix
+    (rspamd DKIM_DMARC=permissive) is STILL rejected — DKIM in DNS is
+    never optional once a sender publishes it; a bad signature is
+    always a bounce even in permissive mode."""
     raw = _sign(_build_raw(subj), tamper=True)
     accepted, resp = _send(POSTFIX, raw)
     assert not accepted, (
-        f"Tampered signature was ACCEPTED by non-enforce postfix — "
-        f"On-BadSignature is not being applied by default. resp: {resp}"
+        f"Tampered signature was ACCEPTED by permissive-mode postfix — "
+        f"rspamd's R_DKIM_REJECT action is not being applied. resp: {resp}"
     )
     assert _wait_for_mail(subj, retries=3) is None, (
         "Tampered signature was rejected at SMTP time but still ended up in "
@@ -261,10 +249,10 @@ def test_verify_bad_signature_delivered_in_log_mode(subj):
 
 
 def test_verify_missing_signature_delivered_in_log_mode(subj):
-    """Log mode delivers unsigned mail and stamps `dkim=none` (or leaves
-    dkim off entirely) — never rejects, even if the sender is expected to
-    sign. Also proves AlwaysAddARHeader is on in log mode so an admin
-    sees the missing signature explicitly."""
+    """Log mode delivers unsigned mail and stamps `dkim=none` — never
+    rejects, even if the sender is expected to sign. Also proves the
+    A-R stamping is always on in log mode so an admin sees the missing
+    signature explicitly."""
     raw = _build_raw(subj)  # unsigned
     accepted, resp = _send(POSTFIX_LOG, raw)
     assert accepted, f"Log-mode postfix rejected an unsigned mail: {resp}"
@@ -272,19 +260,21 @@ def test_verify_missing_signature_delivered_in_log_mode(subj):
     msg = _wait_for_mail(subj)
     assert msg is not None, "Log-mode postfix accepted at SMTP but did not deliver"
     ar = " ".join(msg.get_all("Authentication-Results", []))
-    # AlwaysAddARHeader → opendkim adds `dkim=none` for messages without a
-    # DKIM-Signature header at all, so a monitoring admin can grep for it.
+    # rspamd stamps `dkim=none` for messages without a DKIM-Signature
+    # header at all, so a monitoring admin can grep for it in delivered
+    # mail during a `log`-mode roll-out.
     assert "dkim=none" in ar.lower(), (
         f"Log-mode should stamp dkim=none on an unsigned mail. "
         f"Authentication-Results: {ar!r}"
     )
 
 
-# Note: Case 6 (unknown DKIM key rejected always) is NOT directly tested here.
-# The mechanism (`On-KeyNotFound reject` in opendkim.conf.base) is in place and
-# works in production — see the module docstring for details on why the e2e
-# environment cannot reproduce it (Docker embedded resolver rewrites NXDOMAIN
-# from the internal dnsmasq into SERVFAIL, which opendkim treats as tempfail).
-# The nodkim.local zone in dns/dnsmasq.conf is kept committed as a hook for a
-# future test if the e2e stack is ever wired to a shell-side resolver instead
-# of Docker's embedded one.
+# Note: unknown-key DKIM (public key missing in DNS) is NOT directly
+# tested here — the Docker embedded resolver rewrites the container-local
+# dnsmasq's NXDOMAIN into SERVFAIL, which rspamd treats as a temporary
+# failure and does not turn into a permanent reject. In real production
+# (Docker Swarm forwarding to the host / internet resolver) NXDOMAIN
+# passes through unchanged and rspamd's `R_DKIM_PERMERROR` fires as
+# intended. The nodkim.local zone in dns/dnsmasq.conf is kept committed
+# as a hook for a future test if the e2e stack is ever wired to a
+# shell-side resolver instead of Docker's embedded one.

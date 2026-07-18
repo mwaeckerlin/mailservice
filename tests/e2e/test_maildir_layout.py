@@ -14,7 +14,7 @@ import glob
 import imaplib
 import os
 
-from conftest import DOVECOT, IMAP_P, ALICE, ALICE_PW, smtp_send
+from conftest import DOVECOT, IMAP_P, ALICE, ALICE_PW, smtp_send, imap_starttls
 from test_imap import _wait_for_mail
 
 MAIL_ROOT = "/var/mail/domains"
@@ -26,7 +26,7 @@ def test_maildir_uses_domain_localpart_layout(unique_subject):
     # deliver a real mail and confirm it is readable — this materialises the
     # maildir on disk at whatever path the dovecot config resolves.
     smtp_send(unique_subject, to=ALICE)
-    with imaplib.IMAP4(DOVECOT, IMAP_P) as conn:
+    with imap_starttls() as conn:
         conn.login(ALICE, ALICE_PW)
         assert _wait_for_mail(conn, unique_subject), "mail was not delivered to INBOX"
 

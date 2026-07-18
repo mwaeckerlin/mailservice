@@ -29,7 +29,8 @@ your correspondence to a third-party mail provider.
 - SMTP send and receive, with TLS and authenticated submission
 - IMAP and POP3 retrieval, with TLS
 - Server-side mail filters via Sieve (ManageSieve)
-- Greylisting (milter-greylist) to cut spam
+- Rspamd (built-in DKIM signing + DKIM/DMARC/SPF verify, greylist, Bayes-scored spam)
+- ClamAV antivirus (mail parts scanned by rspamd, virus hits rejected at SMTP time)
 - Incoming SPF check, DKIM signing and verification, DMARC support
 - Reliable delivery guarantee: deliver to INBOX, or reject with an informative error
 - Fully isolated local test stack — no mail ever leaves the machine
@@ -50,6 +51,11 @@ in with your full email address and password.
 | Sieve | StartTLS | 4190 |
 
 Without TLS the plain ports are IMAP `143`, SMTP `25`, POP3 `110`.
+
+Logging in always requires an encrypted connection: the server offers the
+cleartext password mechanisms only over TLS, so a mail client must use
+SSL/TLS or STARTTLS to authenticate. Configure your client with one of the
+secure settings above.
 
 > **After a server upgrade or migration, set a new password.** Dovecot 2.4 refuses
 > legacy weak password hashes (e.g. `MD5-CRYPT` carried over from an older system),
@@ -92,7 +98,9 @@ This stack is composed of independently maintained images:
 - Dovecot (IMAP/POP3/Sieve) — https://github.com/mwaeckerlin/dovecot
 - PostfixAdmin — https://github.com/mwaeckerlin/postfixadmin
   and its nginx proxy — https://github.com/mwaeckerlin/postfixadmin-proxy
-- Greylisting — https://github.com/mwaeckerlin/postgrey (now uses milter-greylist)
+- Rspamd (DKIM + DMARC + SPF + greylist + Bayes) — https://github.com/mwaeckerlin/rspamd
+- ClamAV (antivirus) — https://github.com/mwaeckerlin/clamav
+- Redis (Bayes / greylist / ratelimit state, headless) — https://github.com/mwaeckerlin/redis
 - SnappyMail webmail — see [Frontend: SnappyMail](#frontend-snappymail-web-mailer)
 
 ### Upgrading PostfixAdmin
@@ -132,11 +140,65 @@ page access; trigger it once:
 
 The database user needs `ALTER`/`CREATE` privileges for the upgrade to succeed.
 
-### SPF, DKIM and DMARC
+### Authentication over TLS (secure default)
 
-One mailservice can send and receive mail for many independent domains.
-Throughout this section the mailservice itself runs on `example.email`, and
-serves the following four domains as an example:
+Passwords are never accepted over an unencrypted connection. This is the
+default and needs no configuration:
+
+- **Dovecot (IMAP/POP3/ManageSieve):** the cleartext `PLAIN`/`LOGIN`
+  mechanisms are offered **only over TLS**. A client must connect via
+  IMAPS/POP3S or issue STARTTLS before authenticating. Controlled by the
+  `DOVECOT_ALLOW_CLEARTEXT` env on the `dovecot` service (default `no`).
+  Because this requires a TLS certificate to be present, a stack **without
+  a certificate** has no usable login until either a cert is provided or the
+  setting is deliberately softened.
+- **Postfix (SMTP submission):** `smtpd_tls_auth_only=yes` — SASL is offered
+  only after STARTTLS, so submission credentials are likewise never sent in
+  the clear.
+
+Soften this **only deliberately** by setting `DOVECOT_ALLOW_CLEARTEXT=yes`
+(for example a trusted, isolated network that has no certificates). Doing so
+lets clients send passwords in cleartext and is not recommended.
+
+### Antispam, antivirus, signing — one rspamd
+
+Starting with v3.0.0 one **rspamd** container replaces the historical
+stack of opendkim + opendmarc + postgrey (milter-greylist) +
+postfix-policyd-spf-perl. Rspamd does all of it in one process, with
+one config, one log stream, one milter connection to postfix:
+
+- **DKIM signing** for every outgoing mail (per-domain 2048-bit RSA
+  keys, auto-generated on first start).
+- **DKIM verification** on every incoming mail (`Authentication-Results:
+  … dkim=pass|fail|none|permerror`).
+- **DMARC** — combines DKIM alignment + SPF alignment + the sender's
+  `_dmarc` policy, rejects on `p=reject` hard fail when the mode
+  allows it.
+- **SPF** — inline, without a separate policyd. The verdict lands in
+  the same `Authentication-Results:` header.
+- **Greylist** — Redis-backed triplet state, **score-based**: only
+  mail that already looks suspicious (score above the greylist
+  threshold) is delayed with a 4xx; clean first-time senders are
+  never delayed (v2's postgrey delayed every unknown triplet). Own
+  users (SASL-authenticated submissions) always bypass.
+- **Bayes-scored spam** — one global classifier per stack, trained
+  event-driven by IMAPSieve when the user moves mail into or out of
+  Junk. No cron.
+- **Antivirus** — mail parts are handed to **ClamAV** (`clamd` in a
+  sibling container); a virus hit contributes a large score that
+  pushes the mail above the reject threshold.
+
+Sibling containers on the same `antispam` network:
+
+- `mwaeckerlin/rspamd` — the milter + all the modules above.
+- `mwaeckerlin/redis` (headless) — Bayes / greylist / ratelimit state.
+- `mwaeckerlin/clamav` — clamd + freshclam supervisor.
+
+Postfix reaches rspamd on the milter port 11332 (single `RSPAMD` env
+on the postfix service — `RSPAMD: rspamd`).
+
+Throughout the rest of this section the mailservice itself runs on
+`example.email`, and serves the following four domains as an example:
 
 - `example.com`
 - `example.net`
@@ -145,9 +207,9 @@ serves the following four domains as an example:
 
 Postfix accepts mail for the extra domains once they are added in
 PostfixAdmin (each becomes a `virtual_mailbox_domain`); no `docker
-compose.yml` change is needed for that. SPF, DKIM and DMARC on the other
-hand are **per sending domain** — each domain owns its own DNS records
-below, and DKIM signs with a **separate key per domain**.
+compose.yml` change is needed for that. SPF, DKIM and DMARC on the
+other hand are **per sending domain** — each domain owns its own DNS
+records below, and DKIM signs with a **separate key per domain**.
 
 #### SPF (Sender Policy Framework)
 
@@ -155,13 +217,12 @@ SPF lets receiving servers verify that inbound mail claiming to come from your d
 
 **Incoming check (server-side)**
 
-The postfix container runs `postfix-policyd-spf-perl` automatically. It checks SPF on every incoming message and rejects mail that fails a hard SPF fail (`-all`). To disable it:
-
-```yaml
-postfix:
-  environment:
-    CHECK_SPF: "no"
-```
+Rspamd's SPF module runs against every incoming mail and stamps the
+result into `Authentication-Results:`. The verdict feeds into DMARC
+alignment. Postfix's `CHECK_SPF` auto-disables when `RSPAMD` is set —
+running the old `postfix-policyd-spf-perl` in parallel would produce
+contradictory verdicts. Override with `CHECK_SPF: "yes"` if you want
+the policy-service path back for a specific reason.
 
 **Outgoing DNS record**
 
@@ -215,28 +276,33 @@ DKIM adds a cryptographic signature to every outgoing message. Receiving servers
 
 **How it works in this stack**
 
-The `opendkim` service signs outgoing mail and verifies signatures on incoming mail (mode `sv`). Postfix sends mail through the OpenDKIM milter on port 10026.
+The `rspamd` service signs outgoing mail (via `dkim_signing` module)
+and verifies incoming signatures (via `dkim` module). Postfix hands
+every mail to the rspamd milter on port 11332, on both signing and
+verify paths.
 
 **Enable in `docker compose.yml`**
 
-The `opendkim` service is already present. Set `OPENDKIM: opendkim` in the `postfix` environment (already done in the default `docker compose.yml`):
+The `rspamd` service is already present. Set `RSPAMD: rspamd` in the
+`postfix` environment (already done in the default `docker-compose.yml`):
 
 ```yaml
 postfix:
   environment:
-    OPENDKIM: opendkim    # host[:port], default port 10026
+    RSPAMD: rspamd        # host[:port], default port 11332
 
-opendkim:
+rspamd:
   environment:
     DOMAIN:   example.com   # required — your mail domain (single-domain form)
     SELECTOR: mail          # optional, default: mail
   volumes:
-    - dkim-keys:/etc/opendkim/keys
+    - dkim-keys:/var/lib/rspamd    # per-domain private keys
 ```
 
 **First start — get your DNS record**
 
-On first start, OpenDKIM auto-generates a 2048-bit RSA key and prints the DNS record:
+On first start, rspamd's init helper runs `rspamadm dkim_keygen`
+per domain (2048-bit RSA) and prints the DNS record:
 
 ```
 ==================================================================
@@ -257,28 +323,44 @@ Value: v=DKIM1; h=sha256; k=rsa; p=<public-key>
 
 The private key is persisted in the `dkim-keys` volume — back it up and keep it secret.
 
+**Operator notification on key generation (optional)**
+
+If `NOTIFY_EMAIL` is set on the rspamd service, the same records are
+also delivered by e-mail — useful when a container restart on a fresh
+volume would otherwise print keys only to stdout that no-one reads.
+Delivery uses a minimal in-process SMTP client (no external `sendmail`
+binary), best-effort, and never blocks start-up:
+
+```yaml
+rspamd:
+  environment:
+    NOTIFY_EMAIL: "hostmaster@example.email"
+    NOTIFY_SMTP:  "postfix:25"
+```
+
 **Key rotation**
 
 1. Set `SELECTOR` to a new name (e.g. `mail2`) in `docker compose.yml`.
-2. Restart the `opendkim` container — a new key is generated and printed.
+2. Restart the `rspamd` container — a new key is generated for every
+   domain, printed to stdout (and mailed if `NOTIFY_EMAIL` is set).
 3. Publish the new DNS record alongside the old one.
 4. After the old selector's TTL expires, remove it from DNS.
-5. Remove the old key from the volume if desired.
+5. Remove the old key files from the `dkim-keys` volume if desired.
 
 **Multi-domain**
 
-For more than one sending domain use `DOMAINS` (space-separated). OpenDKIM
-generates one 2048-bit key **per domain**, prints one DNS TXT record per
-domain on first start, and signs `From:` addresses of any listed domain with
-that domain's key:
+For more than one sending domain use `DOMAINS` (space-separated).
+Rspamd generates one 2048-bit key **per domain**, prints one DNS TXT
+record per domain on first start, and signs any `From:` address whose
+domain is in the list with that domain's key:
 
 ```yaml
-opendkim:
+rspamd:
   environment:
     DOMAINS:  "example.com example.net example.email example.org"
     SELECTOR: mail
   volumes:
-    - dkim-keys:/etc/opendkim/keys
+    - dkim-keys:/var/lib/rspamd
 ```
 
 Publish one DNS record per domain:
@@ -306,54 +388,49 @@ Notes:
 - The selector name (`mail` by default) is shared across all domains — each
   domain still has its own key because the DNS record lives under
   `mail._domainkey.<domain>` on that domain's own zone.
-- Keys are persisted per domain at `/etc/opendkim/keys/<domain>/mail.private`
-  in the `dkim-keys` volume. Adding a new domain later means: extend
-  `DOMAINS`, restart the container, publish the printed DNS record. Existing
-  domains' keys are reused (not regenerated).
-- `DOMAIN` (singular) is kept as the single-domain fallback and is used only
-  when `DOMAINS` is unset.
+- Keys are persisted per domain at
+  `/var/lib/rspamd/dkim/<selector>.<domain>.key` in the `dkim-keys`
+  volume. Adding a new domain later means: extend `DOMAINS`, restart
+  the container, publish the printed DNS record. Existing domains'
+  keys are reused (not regenerated).
+- `DOMAIN` (singular) is kept as the single-domain fallback and is
+  used only when `DOMAINS` is unset.
 
 **DKIM/DMARC verification — single knob `DKIM_DMARC`**
 
-Both opendkim and opendmarc read one env var, `DKIM_DMARC`, with four
-levels:
+Rspamd reads one env var, `DKIM_DMARC`, with four levels:
 
 | `DKIM_DMARC` | Meaning                                                                                                                                    |
 |--------------|--------------------------------------------------------------------------------------------------------------------------------------------|
-| `off`        | Verification stage is off. Outgoing mail is still signed, incoming mail passes through untouched (no `Authentication-Results` header).     |
-| `log`        | Verify every incoming signature and DMARC policy, stamp the result into an `Authentication-Results` header — **never reject**.             |
-| `permissive` | Reject bad or unknown-key DKIM signatures (5.7.20); accept unsigned mail. Reject on `_dmarc … p=reject` hard fail (5.7.1). Marc's default. |
-| `reject`     | On top of `permissive`, also reject mail without a DKIM signature. Right for ingresses where every peer is known to sign.                  |
-
-Set the SAME value on both `opendkim` and `opendmarc` (they must agree so
-opendmarc trusts opendkim's `dkim=` verdict).
+| `off`        | Verification off. Outgoing mail is still signed, incoming mail passes through untouched (no `Authentication-Results` header).              |
+| `log`        | Verify every incoming signature, SPF and DMARC policy, stamp the result into an `Authentication-Results` header — **never reject**.        |
+| `permissive` | Reject bad or unknown-key DKIM signatures (rspamd action `reject`); accept unsigned mail. Reject on `_dmarc … p=reject` hard fail. Default recommendation for a production MX. |
+| `reject`     | On top of `permissive`, also reject mail whose spam score exceeds `RSPAMD_REJECT_SCORE` for other reasons. Right for ingresses where every peer is known to sign.              |
 
 **Image default is `reject`** (strict enforcement). See «Upgrade &
 Monitoring» below for the recommended path from log to permissive.
 
 Own users are unaffected: SASL-authenticated submissions bypass the
-milter through the whitelist ordering, just like for greylisting.
+milter through rspamd's built-in `AUTHENTICATED` symbol, just like for
+greylisting.
 
 **Upgrade & Monitoring — how to check before you enforce**
 
 Before you flip a running mailservice to `permissive` or `reject`, run in
 `log` mode for a few days and watch what would have been rejected.
 
-1. In your `docker-compose.yml`, set both milters to log mode:
+1. In your `docker-compose.yml`, set the mode to log:
 
     ```yaml
-    opendkim:
-      environment:
-        DKIM_DMARC: log
-    opendmarc:
+    rspamd:
       environment:
         DKIM_DMARC: log
     ```
 
-2. Restart the two services:
+2. Restart the rspamd service:
 
     ```
-    docker compose up -d opendkim opendmarc
+    docker compose up -d rspamd
     ```
 
 3. Watch for verdicts in delivered mail. Every incoming mail is stamped
@@ -361,7 +438,7 @@ Before you flip a running mailservice to `permissive` or `reject`, run in
    or in the dovecot log:
 
     ```
-    docker compose exec dovecot grep -rE '^Authentication-Results:.*(dkim=fail|dkim=none|dkim=permerror|dmarc=fail)' /var/mail/domains/ | head
+    docker compose exec dovecot grep -rE '^Authentication-Results:.*(dkim=fail|dkim=none|dkim=permerror|dmarc=fail|spf=fail)' /var/mail/domains/ | head
     ```
 
     Or, if you have IMAP access, search server-side:
@@ -371,132 +448,143 @@ Before you flip a running mailservice to `permissive` or `reject`, run in
     imap> UID SEARCH HEADER Authentication-Results "dmarc=fail"
     ```
 
-4. Also watch the milter containers' own logs at start-up — they print
-   their current mode:
+4. Rspamd logs every decision to its container stdout — filter by
+   action:
 
     ```
-    docker compose logs opendkim opendmarc | grep '\*\*\*\* Starting Open'
+    docker compose logs rspamd | grep -E '\<action=(reject|add header|greylist)\>' | head
     ```
 
-    Expected output for log mode:
-    `**** Starting OpenDKIM in mode=log (verify, add A-R, never reject) …`
+    For a rspamd-side history browser, expose port 11334 and open the
+    web UI (`http://<host>:11334/`) — every scan of the last hours
+    with score, symbols and headers is browsable there.
 
-5. For every `dkim=fail`, `dkim=permerror` or `dmarc=fail (p=reject
-   dis=none)` you find, decide: is this a real sender that would get
-   bounced under enforcement, or a broken/forged mail that _should_ be
+5. For every `dkim=fail`, `dkim=permerror` or `dmarc=fail (p=reject)`
+   you find, decide: is this a real sender that would get bounced
+   under enforcement, or a broken/forged mail that _should_ be
    bounced? If it's a real sender, contact them so they can fix their
    DKIM/DMARC or their forwarding chain (a mailing list that breaks
-   DMARC alignment must be re-signing with its own domain or rewriting
-   `From:` for `p=reject` senders — modern Mailman does this
-   automatically).
+   DMARC alignment must be re-signing with its own domain or
+   rewriting `From:` for `p=reject` senders — modern Mailman does
+   this automatically).
 
 6. Once no legitimate mail is affected, escalate. Typical path:
-   `log` → `permissive` (rejects broken DKIM and `p=reject` failures but
-   still accepts mail from small senders that publish nothing) →
-   optionally `reject` (only for an ingress where every peer is a known
-   signer).
+   `log` → `permissive` (rejects broken DKIM and `p=reject` failures
+   but still accepts mail from small senders that publish nothing)
+   → optionally `reject` (only for an ingress where every peer is a
+   known signer).
 
-**Key rotation window: `DKIM_KEYERROR_ACTION=tempfail`**
+**Reject-score threshold: `RSPAMD_REJECT_SCORE`**
 
-If you expect legitimate senders in the middle of a DKIM key rotation,
-opendkim can return a `4xx` (temporary failure) instead of `5.7.20` when
-the referenced DKIM key is missing in DNS:
+Score above which rspamd hard-rejects at SMTP time. Default `15` —
+rspamd's own conservative default. Lowering it catches more spam but
+raises the risk of bouncing legitimate mail with wonky signals; raising
+it does the opposite. In doubt, keep the default and let Bayes learn:
 
 ```yaml
-opendkim:
+rspamd:
   environment:
-    DKIM_DMARC:            permissive
-    DKIM_KEYERROR_ACTION:  tempfail    # 4xx instead of 5xx on KeyNotFound
+    RSPAMD_REJECT_SCORE: "15"
 ```
 
-The sender's MX will retry (typically for ~5 days) and the sender gets a
-delayed-notification if it still fails. Default `reject` gives the sender
-an immediate bounce with the actual error — usually better because the
-sender's admin sees the problem right away.
+**Disable DKIM signing / verification in postfix**
 
-**Disable DKIM signing in postfix**
-
-Remove or leave empty the `OPENDKIM` environment variable:
+Remove or leave empty the `RSPAMD` environment variable:
 
 ```yaml
 postfix:
   environment:
-    OPENDKIM: ""
+    RSPAMD: ""
 ```
 
-**Adding DKIM + DMARC to an existing compose file (2.0.0 upgrade path)**
+**Upgrading from v2.x (opendkim + opendmarc + postgrey + policyd-spf)**
 
-If you are upgrading from an older release where `opendkim` and
-`opendmarc` were not part of your stack, **nothing breaks on a plain
-image update**: `postfix/start.sh` only wires the milter in when the
-`OPENDKIM` / `OPENDMARC` env is set, and the shipped Dockerfile default
-for both is empty. Pulling the new images without changing your compose
-file leaves the milter chain identical to before — no DKIM signing, no
-DKIM/DMARC verification, no risk of legitimate mail being bounced.
+v3.0.0 replaces the whole legacy chain (`opendkim`, `opendmarc`,
+`postgrey`, `postfix-policyd-spf-perl`) with one `rspamd` container.
+On a running v2.x install:
 
-To actually enable the feature, add the two services and reference them
-from postfix. **Start in log mode** so any legitimate sender that would
-be affected by real enforcement shows up in the delivered mail's
-`Authentication-Results` header before you flip the switch:
+1. Replace the four legacy services with the three v3.0.0 services in
+   `docker-compose.yml`:
 
-```yaml
-services:
-  opendkim:
-    image: mwaeckerlin/opendkim
-    environment:
-      DOMAINS:     "example.com example.org"   # every domain you sign for
-      AUTHSERV_ID: mail.example.com            # any label; must match opendmarc
-      DKIM_DMARC:  log                         # start in monitor mode
-    volumes:
-      - dkim-keys:/etc/opendkim/keys           # persist per-domain keys
-    networks: [dkim-net]
+    ```yaml
+    services:
+      redis:
+        image: mwaeckerlin/redis
+        volumes:
+          - redis-data:/data
+        networks: [antispam]
 
-  opendmarc:
-    image: mwaeckerlin/opendmarc
-    environment:
-      AUTHSERV_ID: mail.example.com            # SAME value as opendkim
-      DKIM_DMARC:  log
-    networks: [dkim-net]
+      clamav:
+        image: mwaeckerlin/clamav
+        volumes:
+          - clamav-db:/var/lib/clamav
+        networks: [antispam]
 
-  postfix:
-    # (your existing postfix service — add these two env vars and the network)
-    environment:
-      OPENDKIM:  opendkim
-      OPENDMARC: opendmarc
-    networks:
-      # ...your existing networks...
-      dkim-net:
+      rspamd:
+        image: mwaeckerlin/rspamd
+        environment:
+          DOMAINS:     "example.com example.org"   # every domain you sign for
+          AUTHSERV_ID: mail.example.com
+          DKIM_DMARC:  log                          # start in monitor mode
+          REDIS_HOST:  redis
+          CLAMAV_HOST: clamav
+        volumes:
+          - dkim-keys:/var/lib/rspamd      # keep the v2.x dkim-keys volume
+        networks: [antispam]
 
-networks:
-  # ...your existing networks...
-  dkim-net:
+      postfix:
+        # your existing service — swap OPENDKIM/OPENDMARC/GREYLIST for RSPAMD:
+        environment:
+          RSPAMD: rspamd
+        networks:
+          - postfix-backend
+          - antispam
+    ```
 
-volumes:
-  # ...your existing volumes...
-  dkim-keys:
-```
+2. The DKIM key volume you used with `mwaeckerlin/opendkim`
+   (typically mounted at `/etc/opendkim/keys/`) contains files at
+   `<domain>/mail.private`. Rspamd expects
+   `/var/lib/rspamd/dkim/mail.<domain>.key`. Move each key file into
+   the new location once — a one-shot init container is enough:
 
-On first start, `opendkim` prints one `DNS TXT record` per domain in
-`DOMAINS` to its container log — publish each one under
-`mail._domainkey.<domain>` in DNS. Then follow the «Upgrade & Monitoring»
-recipe above to escalate `DKIM_DMARC` from `log` → `permissive` → (only
-if all your peers sign) → `reject`.
+    ```bash
+    docker run --rm -v mailservice_dkim-keys:/keys alpine sh -c '
+      cd /keys
+      for d in */; do
+        dom=${d%/}
+        test -f "$dom/mail.private" && mv "$dom/mail.private" "dkim/mail.$dom.key"
+      done
+      rmdir */ 2>/dev/null
+    '
+    ```
+
+    (Skip this step if you accept regenerating the keys — you would
+    also have to publish the new public key in DNS.)
+
+3. `docker compose up -d rspamd redis clamav postfix`. Verify with
+   `docker compose logs rspamd` and by grepping delivered mail's
+   `Authentication-Results:` header for a few days in `log` mode,
+   then escalate.
+
+Nothing on the DNS side has to change — the DKIM public key, SPF
+record, DMARC record and selector name all stay the same.
 
 #### DMARC (Domain-based Message Authentication, Reporting and Conformance)
 
-DMARC ties SPF and DKIM together and tells receiving servers what to do
-when both checks fail. **On the sending side** it is DNS-only. **On the
-receiving side** the mailservice runs `opendmarc` as a milter after
-opendkim. Its behavior is controlled by the same `DKIM_DMARC` env as
-opendkim — see the DKIM section above. On `permissive` or `reject`
-opendmarc will reject a mail whose `From:` domain publishes `p=reject`
-and that passes neither DKIM nor SPF alignment (`550 5.7.1`); on `log`
-it stamps the result but never rejects; on `off` it does nothing.
+DMARC ties SPF and DKIM together and tells receiving servers what to
+do when both checks fail. **On the sending side** it is DNS-only.
+**On the receiving side** the rspamd DMARC module (same container,
+same milter connection) evaluates the sender's `_dmarc` record,
+combines DKIM alignment + SPF alignment, and — under `DKIM_DMARC`
+`permissive` or `reject` — rejects a mail whose `From:` domain
+publishes `p=reject` and passes neither DKIM nor SPF alignment
+(`550 5.7.1`). Under `log` it stamps the verdict into
+`Authentication-Results:` but never rejects. Under `off` it does
+nothing.
 
-`opendmarc` is wired in by default in `docker compose.yml` via
-`OPENDMARC: opendmarc` on the postfix service and connects to port 8893.
-Own users (SASL-authenticated submissions and internal container networks)
-bypass the milter through `TRUSTED_HOSTS`.
+Own users (SASL-authenticated submissions and internal container
+networks) bypass the DMARC check via the built-in `AUTHENTICATED`
+and `LOCAL` bypass symbols.
 
 **Minimal DNS record**
 
@@ -552,6 +640,90 @@ extra record.
 1. Start with `p=none; rua=mailto:your-address` and collect reports for a few weeks.
 2. Once you are confident SPF and DKIM are working correctly, move to `p=quarantine`.
 3. Finally switch to `p=reject` for maximum protection.
+
+#### Antivirus (ClamAV)
+
+The `clamav` sibling runs `clamd` in the foreground with `freshclam
+--daemon` maintaining the signature database at
+`/var/lib/clamav/`. Rspamd's `antivirus` module scans every mail
+part; a signature hit contributes a large score (default 1000) that
+pushes the mail above `RSPAMD_REJECT_SCORE`, and rspamd rejects
+with SMTP 5xx at DATA time.
+
+Freshclam takes minutes on the very first start of a fresh `clamav-db`
+volume — the container is healthy from the start (clamd loads), but
+until freshclam finishes downloading the initial bundle from
+`database.clamav.net`, the antivirus scanner does not actually flag
+anything. Once the DB is present it re-downloads incrementally.
+
+Verify end-to-end with the EICAR test string
+(`X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*` —
+industry-standard, safe): submitting it to postfix must produce a
+5xx reject.
+
+Persistence: `/var/lib/clamav` (non-critical; freshclam re-populates
+if lost, at the cost of the initial download).
+
+#### Bayes-scored spam and autotraining
+
+Rspamd's Bayes classifier lives in Redis (per `rspamd/classifier-
+bayes.conf`) and is trained event-driven: dovecot's `imap_sieve`
+plugin fires on every IMAP MOVE / COPY into or out of the `Junk`
+folder, pipes the message through
+`/usr/local/bin/report-{spam,ham}` → `rspamc learn_{spam,ham}`
+against the sibling rspamd controller. No cron, no periodic scan.
+
+`RSPAMD_BAYES_PER_USER` toggles between one global classifier
+(default; reaches rspamd's ~200-messages-per-class training threshold
+within days on a small deployment) and per-user classifiers
+(right for large multi-tenant setups; takes months per user to
+reach the threshold). Global is the default because the mailservice
+target is small-to-medium.
+
+Persistence: the `redis-data` volume — losing it wipes the Bayes
+training AND the greylist / ratelimit state. Both regenerate over
+time but the classifier is silent until re-trained.
+
+#### `SPAM_DELIVERY_MODE` (dovecot)
+
+Controls what dovecot does with mail that rspamd tagged as spam
+(`X-Spam-Flag: YES`) but did not reject at SMTP time (score below
+`RSPAMD_REJECT_SCORE`). Set on the dovecot service:
+
+| `SPAM_DELIVERY_MODE` | Behaviour                                                                                                                                                                                                  |
+|----------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `reject`             | Default. Aligned with the mailservice design («Design philosophy: reliability over filtering» below): exactly two outcomes, delivered or SMTP-rejected. Nothing above the reject score ever reaches here.  |
+| `mark`               | Deliver to INBOX with `X-Spam-Flag: YES`, `X-Spam-Status: …`, `X-Spam-Level: ****`. **Never** rewrites the subject and never touches the body — a subject rewrite would invalidate the sender's DKIM signature (and any intermediate hop's ARC seal). The user's MUA can filter on those headers client-side. |
+| `folder`             | Deliver to the recipient's IMAP `Junk` folder via a server-side sieve rule (`X-Spam-Flag: YES` → `fileinto :create "Junk"`). Silent quarantine — explicitly **not** recommended, but supported for admins who ask for it. |
+
+The reject-score threshold is the same in all three modes: mail above
+`RSPAMD_REJECT_SCORE` is always rejected at SMTP time. `SPAM_DELIVERY_MODE`
+only decides what happens to borderline mail (between add-header score
+and reject score) that was already accepted.
+
+**Legal framing — SMTP-reject vs. Aufbewahrungspflicht**
+
+An SMTP-time rejection (`5xx` at `DATA`) means the mail *never
+became mail on our side*: it was refused before it left the sender's
+queue. Nothing was accepted, nothing was received, nothing was
+stored. That is materially different from the accept-then-file-into-
+Junk pattern that the big providers use.
+
+Legal record-keeping duties (e.g. commercial correspondence
+retention under Swiss / EU tax and commercial law, or e-discovery
+holds) attach to received mail — mail your server accepted. A
+rejected mail is not received mail; the sender's MTA has the
+bounce, and the sender can retry, sign, fix their SPF/DMARC, or
+resend by another route. The mailservice's `reject`-mode default
+therefore *reduces* the retention perimeter compared to a
+`folder`-mode setup that quietly accepts everything and files it
+into Junk.
+
+Operators who need a quarantine trail for auditing reasons should
+choose `folder` mode explicitly, understand the retention
+consequences, and set up the Junk folder as an audit target
+(retention policy, no user delete). The default deliberately does
+not do this.
 
 ### Frontend: SnappyMail Web-Mailer
 

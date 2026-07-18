@@ -2,7 +2,7 @@
 import imaplib
 import time
 import pytest
-from conftest import DOVECOT, IMAP_P, ALICE, ALICE_PW, BOB, BOB_PW, smtp_send
+from conftest import DOVECOT, IMAP_P, ALICE, ALICE_PW, BOB, BOB_PW, smtp_send, imap_starttls
 
 
 def _wait_for_mail(conn: imaplib.IMAP4, subject: str,
@@ -17,13 +17,13 @@ def _wait_for_mail(conn: imaplib.IMAP4, subject: str,
 
 
 def test_imap_login():
-    with imaplib.IMAP4(DOVECOT, IMAP_P) as conn:
+    with imap_starttls() as conn:
         typ, _ = conn.login(ALICE, ALICE_PW)
         assert typ == "OK"
 
 
 def test_imap_wrong_password_rejected():
-    with imaplib.IMAP4(DOVECOT, IMAP_P) as conn:
+    with imap_starttls() as conn:
         with pytest.raises(imaplib.IMAP4.error):
             conn.login(ALICE, "wrongpassword")
 
@@ -31,7 +31,7 @@ def test_imap_wrong_password_rejected():
 def test_imap_mail_delivered_to_inbox(unique_subject):
     """Mail sent via SMTP appears in the recipient's INBOX."""
     smtp_send(unique_subject)
-    with imaplib.IMAP4(DOVECOT, IMAP_P) as conn:
+    with imap_starttls() as conn:
         conn.login(ALICE, ALICE_PW)
         msgs = _wait_for_mail(conn, unique_subject)
     assert msgs, f"Mail with subject '{unique_subject}' not found in INBOX"
@@ -41,7 +41,7 @@ def test_imap_fetch_message_body(unique_subject):
     """Fetched message body matches what was sent."""
     body = f"unique-body-{unique_subject}"
     smtp_send(unique_subject, body=body)
-    with imaplib.IMAP4(DOVECOT, IMAP_P) as conn:
+    with imap_starttls() as conn:
         conn.login(ALICE, ALICE_PW)
         msgs = _wait_for_mail(conn, unique_subject)
         assert msgs
@@ -68,7 +68,7 @@ def test_imap_independent_mailboxes(unique_subject):
     """Mail delivered to alice is NOT visible in bob's INBOX."""
     smtp_send(unique_subject)
     time.sleep(3)
-    with imaplib.IMAP4(DOVECOT, IMAP_P) as conn:
+    with imap_starttls() as conn:
         conn.login(BOB, BOB_PW)
         conn.select("INBOX")
         typ, data = conn.search(None, f'SUBJECT "{unique_subject}"')

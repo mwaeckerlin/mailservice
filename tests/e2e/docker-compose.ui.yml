@@ -45,11 +45,15 @@ services:
     depends_on: [postfixadmin]
     networks: [ui-net]
 
+  # SKIP_GPG_VERIFY=1: this repo pins only a placeholder signing key;
+  # the strict verification path is covered by test_snappymail_gpg_verify.py.
   snappymail:
     build:
       context: ../../rainloop
       dockerfile: Dockerfile.php-fpm
       target: php-fpm
+      args:
+        SKIP_GPG_VERIFY: "1"
     volumes:
       - snappymail-data:/app/data
     networks: [ui-net, mail]
@@ -74,7 +78,7 @@ services:
         condition: service_started
       dovecot:
         condition: service_started
-      postgrey:
+      rspamd:
         condition: service_healthy
     environment:
       POSTFIXADMIN_URL:   "http://postfixadmin-proxy:8080"

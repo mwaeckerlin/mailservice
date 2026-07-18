@@ -1,36 +1,51 @@
-"""Greylisting tests via milter-greylist.
+"""Greylisting (v3.0.0 — rspamd greylist module, score-based).
 
-milter-greylist delays mail from unknown (sender, recipient, client-ip) tuples.
-First attempt → 4xx TEMPFAIL; after the greylist delay → 250 OK.
-Test docker-compose starts postgrey with `-w 5` (5 second delay).
-Rejection happens at RCPT phase (SMTPRecipientsRefused with 4xx code).
+Semantic change vs. v2.x: postgrey/milter-greylist delayed EVERY
+unknown (sender, recipient, client-ip) triplet with a 4xx. rspamd's
+greylist module is score-based — only mail whose spam score crosses
+the greylist action threshold (RSPAMD_GREYLIST_SCORE, default 5) is
+delayed; clean mail from an unknown sender is delivered on the first
+attempt. This is deliberate and matches the project philosophy
+(«reliability over filtering», never delay legitimate first-time
+senders).
 
-Each test uses a DISTINCT sender address so tests don't share greylist state.
+Contracts pinned here:
+
+  1. Clean mail from an unknown sender is NOT greylisted — accepted
+     and delivered on the very first attempt. (Regression guard
+     against re-introducing unconditional postgrey-style delays.)
+  2. SASL-authenticated submissions are never greylisted, whatever
+     their content. Mail philosophy: a client only hands the mail to
+     postfix; postfix owns delivery — a tempfail would surface a 451
+     in the webmail and the mail would never reach the queue. Pinned
+     by rspamd/greylist.conf `check_authed = false`.
+
+The delay/retry mechanics of the greylist action itself (4xx then
+accept) only ever apply to mid-score mail; no deterministic payload
+exists for that score band (GTUBE forces reject, clean mail scores
+~0), so that path is covered by rspamd upstream, not e2e.
 """
-import smtplib
-import time
 import imaplib
-import pytest
-from conftest import POSTFIX, SMTP_P, DOVECOT, IMAP_P, ALICE, ALICE_PW, BOB, DOMAIN, build_message
+import smtplib
+import ssl
+import time
+
+from conftest import (
+    POSTFIX, SMTP_P, DOVECOT, IMAP_P, ALICE, ALICE_PW, BOB, DOMAIN,
+    build_message, imap_starttls,
+)
 
 
-GREYLIST_SENDER       = f"greylister@{DOMAIN}"         # used only by test_greylisting_first_attempt_rejected
-GREYLIST_SENDER_RETRY = f"greylister-retry@{DOMAIN}"   # used only by test_greylisting_retry_succeeds
-GREYLIST_WAIT         = 15  # seconds: must exceed greylist delay (5s) + milter overhead
-
-# Milter rejects at RCPT phase; collect both possible exception types
-_SMTP_TEMP_ERROR = (smtplib.SMTPRecipientsRefused, smtplib.SMTPDataError)
-
-
-def _get_error_code(exc: Exception) -> int:
-    if isinstance(exc, smtplib.SMTPRecipientsRefused):
-        return list(exc.recipients.values())[0][0]
-    return exc.smtp_code
+def _insecure_ctx() -> ssl.SSLContext:
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
 
 
 def _wait_for_mail(subject: str, retries: int = 15) -> bool:
     for _ in range(retries):
-        with imaplib.IMAP4(DOVECOT, IMAP_P) as conn:
+        with imap_starttls() as conn:
             conn.login(ALICE, ALICE_PW)
             conn.select("INBOX")
             _, data = conn.search(None, f'SUBJECT "{subject}"')
@@ -40,91 +55,40 @@ def _wait_for_mail(subject: str, retries: int = 15) -> bool:
     return False
 
 
-def test_greylisting_first_attempt_rejected(unique_subject):
-    """First delivery attempt from a new sender is temporarily rejected (4xx)."""
-    subject = f"grey-first-{unique_subject}"
-    msg = build_message(subject, from_=GREYLIST_SENDER)
+def test_clean_unknown_sender_not_greylisted(unique_subject):
+    """A clean mail from a never-seen sender is accepted on the FIRST
+    attempt and delivered. Under postgrey this would have been a 4xx;
+    rspamd's score-based greylisting must not delay clean mail."""
+    sender = f"first-time-{unique_subject.lower()}@{DOMAIN}"
+    subject = f"grey-clean-{unique_subject}"
     with smtplib.SMTP(POSTFIX, SMTP_P) as s:
         s.ehlo(f"testhost.{DOMAIN}")
-        with pytest.raises(_SMTP_TEMP_ERROR) as exc:
-            s.sendmail(GREYLIST_SENDER, [ALICE], msg)
-        code = _get_error_code(exc.value)
-        assert 400 <= code < 500, f"Expected 4xx greylisting response, got {code}"
-
-
-def test_greylisting_retry_succeeds(unique_subject):
-    """After the greylist delay, retry from the same sender/IP is accepted."""
-    subject = f"grey-retry-{unique_subject}"
-    msg = build_message(subject, from_=GREYLIST_SENDER_RETRY)
-
-    # First attempt — expect temporary rejection
-    with smtplib.SMTP(POSTFIX, SMTP_P) as s:
-        s.ehlo(f"testhost.{DOMAIN}")
-        try:
-            s.sendmail(GREYLIST_SENDER_RETRY, [ALICE], msg)
-        except _SMTP_TEMP_ERROR as e:
-            assert 400 <= _get_error_code(e) < 500
-
-    time.sleep(GREYLIST_WAIT)
-
-    # Retry — must now be accepted
-    with smtplib.SMTP(POSTFIX, SMTP_P) as s:
-        s.ehlo(f"testhost.{DOMAIN}")
-        result = s.sendmail(GREYLIST_SENDER_RETRY, [ALICE], msg)
-    assert result == {}, f"Retry was not accepted: {result}"
-
-    # Mail must arrive in INBOX
-    assert _wait_for_mail(subject), f"Greylisted mail never arrived after retry"
-
-
-def test_greylisting_known_sender_not_delayed(unique_subject):
-    """Once a triplet passes greylisting, subsequent mails are auto-whitelisted.
-
-    milter-greylist -A -a 1: after the first successful retry, an auto-whitelist
-    entry (duration 1 day) is created.  The very next message from the same
-    (client_ip, sender, recipient) must be accepted without any delay.
-    """
-    sender   = f"established@{DOMAIN}"
-    subject1 = f"grey-whitelist-1-{unique_subject}"
-    subject2 = f"grey-whitelist-2-{unique_subject}"
-
-    # First mail: greylisted — expect 4xx (or accept silently if timing varies)
-    with smtplib.SMTP(POSTFIX, SMTP_P) as s:
-        s.ehlo(f"testhost.{DOMAIN}")
-        try:
-            s.sendmail(sender, [ALICE], build_message(subject1, from_=sender))
-        except _SMTP_TEMP_ERROR:
-            pass
-
-    time.sleep(GREYLIST_WAIT)
-
-    # Retry: must pass greylisting and create the auto-whitelist entry
-    with smtplib.SMTP(POSTFIX, SMTP_P) as s:
-        s.ehlo(f"testhost.{DOMAIN}")
-        s.sendmail(sender, [ALICE], build_message(subject1, from_=sender))
-
-    # Second distinct mail: auto-whitelist must accept it without delay
-    with smtplib.SMTP(POSTFIX, SMTP_P) as s:
-        s.ehlo(f"testhost.{DOMAIN}")
-        result = s.sendmail(sender, [ALICE], build_message(subject2, from_=sender))
-    assert result == {}, f"Auto-whitelisted sender was still greylisted: {result}"
+        result = s.sendmail(sender, [ALICE],
+                            build_message(subject, from_=sender))
+    assert result == {}, (
+        f"Clean first-time sender was tempfailed/rejected: {result!r} — "
+        f"score-based greylisting must not delay clean mail."
+    )
+    assert _wait_for_mail(subject), (
+        "Clean first-attempt mail was accepted at SMTP time but never "
+        "arrived in INBOX"
+    )
 
 
 def test_authenticated_submission_not_greylisted(unique_subject):
     """SASL-authenticated submission must NEVER be greylisted.
 
-    Mail philosophy: a mail client (webmail) only hands the mail to postfix;
-    postfix owns delivery, queuing and retries.  Greylisting is an INBOUND
-    anti-spam measure — it must not tempfail our own users' submissions,
-    otherwise interactive clients (SnappyMail) surface a 451 to the user and
-    the mail never reaches the postfix queue.
-    """
-    # sender deliberately NOT in the greylist.conf sender whitelist and unique
-    # per run, so only the `auth` whitelist can let this pass
+    Pinned by rspamd/greylist.conf `check_authed = false` (the same
+    guarantee the retired milter-greylist config gave via
+    `racl whitelist auth`)."""
     sender  = f"auth-{unique_subject.lower()}@{DOMAIN}"
     subject = f"grey-auth-{unique_subject}"
     with smtplib.SMTP(POSTFIX, SMTP_P) as s:
         s.ehlo(f"testhost.{DOMAIN}")
+        # postfix offers SASL only over TLS (smtpd_tls_auth_only), so
+        # authenticate over STARTTLS like a real submission client.
+        s.starttls(context=_insecure_ctx())
+        s.ehlo(f"testhost.{DOMAIN}")
         s.login(ALICE, ALICE_PW)
         result = s.sendmail(sender, [BOB], build_message(subject, from_=sender, to=BOB))
-    assert result == {}, f"Authenticated submission was greylisted: {result}"
+    assert result == {}, f"Authenticated submission was greylisted: {result!r}"

@@ -25,3 +25,9 @@
 [submodule "rainloop"]
 	path = rainloop
 	url = git@github.com:mwaeckerlin/rainloop.git
+[submodule "clamav"]
+	path = clamav
+	url = ./clamav/
+[submodule "rspamd"]
+	path = rspamd
+	url = ./rspamd/

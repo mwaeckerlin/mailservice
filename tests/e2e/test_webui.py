@@ -17,6 +17,8 @@ import uuid
 import pytest
 from playwright.sync_api import Browser, Page, expect
 
+from conftest import imap_starttls
+
 # ── Config ───────────────────────────────────────────────────────────────────
 
 PA_URL      = os.environ.get("POSTFIXADMIN_URL", "http://postfixadmin-proxy:8080")
@@ -51,7 +53,7 @@ def _wait_http(url: str, timeout: int = 120) -> None:
 
 
 def _imap_messages(user: str, password: str, subject_substr: str) -> list[str]:
-    with imaplib.IMAP4(DOVECOT, IMAP_P) as conn:
+    with imap_starttls() as conn:
         conn.login(user, password)
         conn.select("INBOX")
         _, data = conn.search(None, f'SUBJECT "{subject_substr}"')

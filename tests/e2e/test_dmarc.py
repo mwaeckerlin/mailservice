@@ -1,18 +1,20 @@
-"""DMARC enforcement on incoming mail.
+"""DMARC enforcement on incoming mail (v3.0.0 — via rspamd).
 
-Marc's semantic: «Sender publiziert DKIM in DNS + keine Signatur ⇒ Fehler.»
-opendkim itself cannot decide this (no signature means no selector to look
-up), so this is opendmarc's job: it evaluates the sender's `_dmarc` record,
-combines it with opendkim's dkim= verdict (via Authentication-Results) and
-its own SPF check, and rejects on hard DMARC fail when the sender publishes
-`p=reject`.
+Semantic: «Sender publishes DKIM/SPF in DNS + neither aligns ⇒ error.»
+Handled by rspamd's DMARC module: it evaluates the sender's `_dmarc`
+record, combines the SPF and DKIM verdicts, and — when the mode is
+`permissive` or `reject` — rejects at SMTP time on hard DMARC fail
+where the sender publishes `p=reject`. In `log` mode the verdict is
+stamped into the Authentication-Results header and the mail is
+delivered anyway.
 
-Test scenarios (both routed through the DEFAULT postfix — `DKIM_ENFORCE=no`
-— to prove opendmarc alone enforces `p=reject`):
+Test scenarios (routed through the DEFAULT postfix — rspamd in
+permissive mode — to prove DMARC enforcement fires even when DKIM
+alone would have accepted):
 
   1. Sender publishes p=reject, sends UNSIGNED     → reject (SPF -all,
      no DKIM ⇒ DMARC hard fail)
-  2. Sender publishes p=reject, sends CORRECTLY   → accept (DKIM passes
+  2. Sender publishes p=reject, sends CORRECTLY    → accept (DKIM passes
      and is aligned with From: domain ⇒ DMARC pass)
 
 The `dmarc-strict.local` domain is set up in `dns/dnsmasq.conf` with
@@ -30,6 +32,7 @@ import pytest
 
 from conftest import (
     POSTFIX, POSTFIX_LOG, SMTP_P, DOVECOT, IMAP_P, ALICE, ALICE_PW,
+    send_raw, imap_starttls,
 )
 
 
@@ -69,19 +72,12 @@ def _sign(raw: bytes, domain: str, selector: str = STRICT_SELECTOR) -> bytes:
 
 def _send(raw: bytes, to: str = ALICE, sender: str = STRICT_SENDER,
           host: str = POSTFIX) -> tuple[bool, str]:
-    try:
-        with smtplib.SMTP(host, SMTP_P, timeout=15) as s:
-            s.ehlo(f"testhost.{STRICT_DOMAIN}")
-            s.mail(sender)
-            s.rcpt(to)
-            code, resp = s.data(raw)
-            return (200 <= code < 400, f"{code} {resp!r}")
-    except smtplib.SMTPResponseException as e:
-        return (False, f"{e.smtp_code} {e.smtp_error!r}")
+    """4xx greylist tempfails are retried by send_raw like a real MTA."""
+    return send_raw(host, sender, to, raw, helo=f"testhost.{STRICT_DOMAIN}")
 
 
 def _wait_for_mail(subject: str, retries: int = 5):
-    with imaplib.IMAP4(DOVECOT, IMAP_P) as conn:
+    with imap_starttls() as conn:
         conn.login(ALICE, ALICE_PW)
         for _ in range(retries):
             conn.select("INBOX")
@@ -101,12 +97,14 @@ def subj():
 def test_dmarc_rejects_unsigned_when_p_reject(subj):
     """Sender publishes `_dmarc … p=reject` and sends unsigned mail →
     rejected at SMTP time, not delivered. Routed through the DEFAULT
-    postfix (DKIM_ENFORCE=no) — opendmarc alone must enforce this."""
+    postfix (rspamd DKIM_DMARC=permissive) — rspamd's DMARC module
+    alone must enforce this, independent of whether DKIM would have
+    let the mail through."""
     raw = _build_raw(subj, from_=STRICT_SENDER)  # NOT signed
     accepted, resp = _send(raw)
     assert not accepted, (
-        f"Unsigned mail from a p=reject sender was ACCEPTED — opendmarc "
-        f"is not enforcing p=reject. resp: {resp}"
+        f"Unsigned mail from a p=reject sender was ACCEPTED — rspamd's "
+        f"DMARC module is not enforcing p=reject. resp: {resp}"
     )
     assert _wait_for_mail(subj) is None, (
         "Unsigned p=reject mail was refused at SMTP time but still "
@@ -116,14 +114,15 @@ def test_dmarc_rejects_unsigned_when_p_reject(subj):
 
 def test_dmarc_p_none_accepts_unsigned(subj):
     """Sender publishes `_dmarc … p=none` and sends unsigned mail →
-    accepted. p=none is monitor-only, opendmarc must not reject.
-    Complements the p=reject-rejects-unsigned case."""
+    accepted. p=none is monitor-only; rspamd's DMARC module must not
+    reject. Complements the p=reject-rejects-unsigned case."""
     NONE_SENDER = "monitor@dmarc-none.local"
     raw = _build_raw(subj, from_=NONE_SENDER)  # unsigned
     accepted, resp = _send(raw, sender=NONE_SENDER)
     assert accepted, (
-        f"Unsigned mail from a p=none sender was REJECTED — opendmarc must "
-        f"only reject on p=reject, not on any DMARC record. resp: {resp}"
+        f"Unsigned mail from a p=none sender was REJECTED — rspamd's "
+        f"DMARC module must only reject on p=reject, not on any DMARC "
+        f"record at all. resp: {resp}"
     )
     assert _wait_for_mail(subj) is not None, (
         "p=none unsigned mail was accepted at SMTP time but did not "
@@ -133,8 +132,8 @@ def test_dmarc_p_none_accepts_unsigned(subj):
 
 def test_dmarc_no_record_accepts_unsigned(subj):
     """Sender has NO `_dmarc` record at all and sends unsigned mail →
-    accepted. Without DMARC there is nothing to enforce; DKIM_ENFORCE=no
-    on the default postfix must let this through."""
+    accepted. Without DMARC there is nothing to enforce; rspamd in
+    permissive mode must let this through."""
     # nodkim.local has no DKIM key AND no _dmarc record → the perfect
     # "sender has nothing published" case.
     NO_DMARC_SENDER = "plain@nodkim.local"
@@ -149,12 +148,12 @@ def test_dmarc_no_record_accepts_unsigned(subj):
     )
 
 
-def test_dmarc_log_mode_delivers_p_reject_fail_with_disposition_none(subj):
+def test_dmarc_log_mode_delivers_p_reject_fail(subj):
     """Same p=reject-fail scenario as `test_dmarc_rejects_unsigned_when_p_reject`,
-    but routed through postfix-log (`DKIM_DMARC=log`). opendmarc must
-    deliver and stamp `dmarc=fail (p=reject dis=none)` — proof that log
-    mode gives an admin the DMARC verdict without any legitimate mail
-    ever being bounced."""
+    but routed through postfix-log (rspamd `DKIM_DMARC=log`). rspamd
+    must deliver and stamp `dmarc=fail` in the Authentication-Results
+    header — proof that log mode gives an admin the DMARC verdict
+    without any legitimate mail ever being bounced."""
     raw = _build_raw(subj, from_=STRICT_SENDER)  # unsigned
     accepted, resp = _send(raw, sender=STRICT_SENDER, host=POSTFIX_LOG)
     assert accepted, (
@@ -165,10 +164,6 @@ def test_dmarc_log_mode_delivers_p_reject_fail_with_disposition_none(subj):
     ar = " ".join(msg.get_all("Authentication-Results", []))
     assert "dmarc=fail" in ar.lower(), (
         f"Log-mode should stamp dmarc=fail on a p=reject unsigned mail. "
-        f"Authentication-Results: {ar!r}"
-    )
-    assert "dis=none" in ar.lower(), (
-        f"Log-mode should record disposition=none (never rejects). "
         f"Authentication-Results: {ar!r}"
     )
 

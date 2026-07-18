@@ -12,7 +12,7 @@ import pytest
 from conftest import (
     DOVECOT, SIEVE_P, IMAP_P,
     ALICE, ALICE_PW,
-    smtp_send,
+    smtp_send, imap_starttls,
 )
 from helpers.managesieve import ManageSieveClient, ManageSieveError
 
@@ -42,7 +42,7 @@ if header :contains "Subject" "SIEVE-SPAM" {
 
 def _imap_search(subject: str, mailbox: str, retries: int = 15) -> bool:
     for _ in range(retries):
-        with imaplib.IMAP4(DOVECOT, IMAP_P) as conn:
+        with imap_starttls() as conn:
             conn.login(ALICE, ALICE_PW)
             conn.select(mailbox)
             _, data = conn.search(None, f'SUBJECT "{subject}"')
@@ -112,7 +112,7 @@ def test_sieve_fileinto_filter(unique_subject):
     subject = f"SIEVE-SORT {unique_subject}"
 
     # Ensure target folder exists
-    with imaplib.IMAP4(DOVECOT, IMAP_P) as conn:
+    with imap_starttls() as conn:
         conn.login(ALICE, ALICE_PW)
         conn.create("SieveTest")
 
@@ -152,7 +152,7 @@ def test_sieve_multiple_rules(unique_subject):
     subj_imp  = f"SIEVE-IMPORTANT {unique_subject}"
     subj_spam = f"SIEVE-SPAM {unique_subject}"
 
-    with imaplib.IMAP4(DOVECOT, IMAP_P) as conn:
+    with imap_starttls() as conn:
         conn.login(ALICE, ALICE_PW)
         conn.create("Important")
         conn.create("Junk")

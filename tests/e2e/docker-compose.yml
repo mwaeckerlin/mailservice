@@ -12,83 +12,103 @@ services:
       retries: 15
       start_period: 3s
 
+  # Generate a throw-away self-signed TLS cert into the `letsencrypt`
+  # volume at the path postfix/dovecot look for it
+  # (/etc/letsencrypt/live/test.local/). This lets the e2e exercise the
+  # real cert-present → TLS-enabled wiring (STARTTLS on 25, submission
+  # auth over TLS, IMAPS on 993) that a plaintext stack cannot. Runs once.
+  certs-init:
+    image: alpine:3.23
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - "apk add --no-cache openssl >/dev/null 2>&1 && mkdir -p /etc/letsencrypt/live/test.local && openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -keyout /etc/letsencrypt/live/test.local/privkey.pem -out /etc/letsencrypt/live/test.local/fullchain.pem -subj '/CN=mail.test.local' -addext 'subjectAltName=DNS:mail.test.local,DNS:test.local,DNS:postfix,DNS:postfix-strict,DNS:postfix-log,DNS:dovecot' && chmod 644 /etc/letsencrypt/live/test.local/*"
+    volumes:
+      - letsencrypt:/etc/letsencrypt
+
   # ────────────────────────────────────────────────────────────────────────
-  # Three DKIM_DMARC modes, each with its own opendkim + opendmarc + postfix.
-  # The three postfixes share dovecot/postgrey/db for delivery.
+  # Antispam / antivirus backend — v3.0.0
   #
-  #   postfix              →  DKIM_DMARC=permissive  (Marc's design default)
-  #   postfix-strict       →  DKIM_DMARC=reject      (also requires signature)
-  #   postfix-log          →  DKIM_DMARC=log         (monitor mode)
+  # One rspamd instance per DKIM_DMARC mode (permissive / reject / log),
+  # each with its own DKIM-key volume so signing tests are deterministic.
+  # All three share one redis (Bayes / greylist / ratelimit) and one
+  # clamav (virus signatures) — those are stateless per postfix.
+  #
+  # Retired in v3.0.0: opendkim, opendmarc, postgrey, postfix-policyd-
+  # spf-perl. All of them collapse into rspamd.
+  #
+  # This is a TEST compose: it BUILDS the mailservice-own images
+  # (postfix, dovecot, rspamd, clamav, postfixadmin, snappymail …) so
+  # the suite also verifies that those images build correctly. Only
+  # FOREIGN images from other repositories (mwaeckerlin/redis,
+  # mwaeckerlin/fake-smtp) are pulled via `image:` — they are built and
+  # tested in their own repositories.
   # ────────────────────────────────────────────────────────────────────────
 
-  # permissive: bad-sig / unknown-key are rejected; unsigned is accepted.
-  # TRUSTED_HOSTS narrow so the test-runner's RFC1918 IP is external and
-  # opendkim actually runs its verify path (with wide TRUSTED_HOSTS, RFC1918
-  # senders are treated as own users and the sign path takes over).
-  opendkim:
-    build: ../../opendkim
-    environment:
-      DOMAINS:       "test.local other.local"
-      AUTHSERV_ID:   "mail.test.local"
-      DKIM_DMARC:    "permissive"
-      NAMESERVERS:   "10.100.0.2"
-      # default TRUSTED_HOSTS (RFC1918) — test-runner IS internal so
-      # outgoing test.local/other.local mail gets signed; ExternalIgnoreList
-      # is hard-wired to loopback in init.cpp so verify still runs on
-      # incoming from test-runner. Both operations happen in parallel.
+  redis:
+    image: mwaeckerlin/redis
+    networks: [antispam]
+    healthcheck:
+      test: ["CMD", "/usr/bin/init", "--healthcheck"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+      start_period: 3s
+
+  clamav:
+    build: ../../clamav
     volumes:
-      - dkim-keys:/etc/opendkim/keys
-    dns: ["10.100.0.2"]
-    depends_on:
-      dns:
-        condition: service_healthy
-    networks: [dkim-net, dns-net]
+      # external cache volume (created by tests/run-e2e.sh): the
+      # ~300 MB signature DB survives `down -v`, so only the very
+      # first run pays the freshclam download.
+      - clamav-db:/var/lib/clamav
+    networks: [antispam]
     healthcheck:
       test: ["CMD", "/usr/bin/init", "--healthcheck"]
-      interval: 2s
+      # freshclam takes minutes on the first-ever start to bootstrap
+      # the DB into the cache volume
+      interval: 5s
       timeout: 5s
-      retries: 20
-      start_period: 5s
+      retries: 240
+      start_period: 10s
 
-  opendmarc:
-    build: ../../opendmarc
+  # permissive: bad-sig / unknown-key / DMARC-p=reject-fail → 5xx.
+  # Unsigned mail is accepted (Marc's philosophy: DKIM optional, must be
+  # correct if published).
+  rspamd:
+    build: ../../rspamd
     environment:
-      AUTHSERV_ID:   "mail.test.local"
-      DKIM_DMARC:    "permissive"
-      # narrow IgnoreHosts so test-runner (10.x) is DMARC-checked;
-      # postfix-locally-generated mail (client IP 127.0.0.1 in the
-      # milter callback) is still whitelisted
-      TRUSTED_HOSTS: "127.0.0.1 ::1"
-      NAMESERVERS:   "10.100.0.2"
-    dns: ["10.100.0.2"]
-    depends_on:
-      dns:
-        condition: service_healthy
-    networks: [dkim-net, dns-net]
-    healthcheck:
-      test: ["CMD", "/usr/bin/init", "--healthcheck"]
-      interval: 2s
-      timeout: 5s
-      retries: 20
-      start_period: 5s
-
-  # reject: on top of permissive, also reject unsigned mail. opendmarc side
-  # is identical to permissive (RejectFailures true either way) so the
-  # `opendmarc` instance above is reused.
-  opendkim-strict:
-    build: ../../opendkim
-    environment:
-      DOMAINS:       "test.local other.local"
-      AUTHSERV_ID:   "mail.test.local"
-      DKIM_DMARC:    "reject"
-      NAMESERVERS:   "10.100.0.2"
+      DOMAINS:                   "test.local other.local"
+      AUTHSERV_ID:               "mail.test.local"
+      DKIM_DMARC:                "permissive"
+      NAMESERVERS:               "10.100.0.2"
+      REDIS_HOST:                "redis"
+      CLAMAV_HOST:               "clamav"
+      RSPAMD_REJECT_SCORE:       "15"
+      # The test-runner lives on a 10.x docker network. Narrow
+      # local_addrs to loopback so its mail counts as EXTERNAL (SPF/
+      # DKIM/DMARC verify paths actually run), and allow-list 10/8 in
+      # sign_networks so its unauthenticated submissions still get
+      # DKIM-signed on the outbound path. Mirrors the v2 opendkim
+      # trick of wide TRUSTED_HOSTS + narrow ExternalIgnoreList.
+      RSPAMD_LOCAL_ADDRS:        "127.0.0.0/8"
+      RSPAMD_SIGN_NETWORKS:      "10.0.0.0/8, 127.0.0.0/8"
+      # Test-only: shorten greylist delay from the production 300s /
+      # 35d — only mid-score mail is ever delayed (score-based
+      # greylisting), but if it is, the retry must fit the pytest
+      # budget.
+      RSPAMD_GREYLIST_TIMEOUT:   "5s"
+      RSPAMD_GREYLIST_EXPIRE:    "1h"
+      # info-level logs make every learn/scan decision visible when
+      # diagnosing a failed suite run
+      RSPAMD_LOG_LEVEL:          "info"
     volumes:
-      - dkim-keys-strict:/etc/opendkim/keys
+      - dkim-keys:/var/lib/rspamd
     dns: ["10.100.0.2"]
     depends_on:
-      dns:
-        condition: service_healthy
-    networks: [dkim-net, dns-net]
+      dns:      { condition: service_healthy }
+      redis:    { condition: service_healthy }
+      clamav:   { condition: service_healthy }
+    networks: [antispam, dns-net]
     healthcheck:
       test: ["CMD", "/usr/bin/init", "--healthcheck"]
       interval: 2s
@@ -96,23 +116,27 @@ services:
       retries: 20
       start_period: 5s
 
-  # log: verify + stamp Authentication-Results header, never reject. Used to
-  # prove that after an upgrade an admin sees the DKIM/DMARC verdict without
-  # any legitimate mail being bounced.
-  opendkim-log:
-    build: ../../opendkim
+  # reject: additionally rejects unsigned mail from external senders.
+  rspamd-strict:
+    build: ../../rspamd
     environment:
-      DOMAINS:       "test.local other.local"
-      AUTHSERV_ID:   "mail.test.local"
-      DKIM_DMARC:    "log"
-      NAMESERVERS:   "10.100.0.2"
+      DOMAINS:               "test.local other.local"
+      AUTHSERV_ID:           "mail.test.local"
+      DKIM_DMARC:            "reject"
+      NAMESERVERS:           "10.100.0.2"
+      REDIS_HOST:            "redis"
+      CLAMAV_HOST:           "clamav"
+      RSPAMD_REJECT_SCORE:   "15"
+      RSPAMD_LOCAL_ADDRS:    "127.0.0.0/8"
+      RSPAMD_SIGN_NETWORKS:  "127.0.0.0/8"
     volumes:
-      - dkim-keys-log:/etc/opendkim/keys
+      - dkim-keys-strict:/var/lib/rspamd
     dns: ["10.100.0.2"]
     depends_on:
-      dns:
-        condition: service_healthy
-    networks: [dkim-net, dns-net]
+      dns:    { condition: service_healthy }
+      redis:  { condition: service_healthy }
+      clamav: { condition: service_healthy }
+    networks: [antispam, dns-net]
     healthcheck:
       test: ["CMD", "/usr/bin/init", "--healthcheck"]
       interval: 2s
@@ -120,18 +144,29 @@ services:
       retries: 20
       start_period: 5s
 
-  opendmarc-log:
-    build: ../../opendmarc
+  # log: verify + Authentication-Results stamping only, never reject.
+  # Used to prove that after an upgrade an admin sees the DKIM/DMARC
+  # verdict without any legitimate mail being bounced.
+  rspamd-log:
+    build: ../../rspamd
     environment:
-      AUTHSERV_ID:   "mail.test.local"
-      DKIM_DMARC:    "log"
-      TRUSTED_HOSTS: "127.0.0.1 ::1"
-      NAMESERVERS:   "10.100.0.2"
+      DOMAINS:               "test.local other.local"
+      AUTHSERV_ID:           "mail.test.local"
+      DKIM_DMARC:            "log"
+      NAMESERVERS:           "10.100.0.2"
+      REDIS_HOST:            "redis"
+      CLAMAV_HOST:           "clamav"
+      RSPAMD_REJECT_SCORE:   "15"
+      RSPAMD_LOCAL_ADDRS:    "127.0.0.0/8"
+      RSPAMD_SIGN_NETWORKS:  "127.0.0.0/8"
+    volumes:
+      - dkim-keys-log:/var/lib/rspamd
     dns: ["10.100.0.2"]
     depends_on:
-      dns:
-        condition: service_healthy
-    networks: [dkim-net, dns-net]
+      dns:    { condition: service_healthy }
+      redis:  { condition: service_healthy }
+      clamav: { condition: service_healthy }
+    networks: [antispam, dns-net]
     healthcheck:
       test: ["CMD", "/usr/bin/init", "--healthcheck"]
       interval: 2s
@@ -143,9 +178,7 @@ services:
     build: ../../postfix
     hostname: postfix.test.local
     environment:
-      GREYLIST:       postgrey
-      OPENDKIM:       opendkim
-      OPENDMARC:      opendmarc
+      RSPAMD:         rspamd
       DOMAIN:         test.local
       HOSTNAME:       mail.test.local
       HOSTROOT:       test.local
@@ -156,24 +189,20 @@ services:
       DISABLE_DNSBL:  "yes"
       MYNETWORKS:     "127.0.0.0/8"
     dns: ["10.100.0.2"]
+    volumes:
+      - letsencrypt:/etc/letsencrypt:ro
     depends_on:
-      postfixadmin-db:
-        condition: service_healthy
-      opendkim:
-        condition: service_healthy
-      opendmarc:
-        condition: service_healthy
-      dns:
-        condition: service_healthy
-    networks: [mail, greylisting, db-net, dkim-net, dns-net]
+      postfixadmin-db: { condition: service_healthy }
+      rspamd:          { condition: service_healthy }
+      dns:             { condition: service_healthy }
+      certs-init:      { condition: service_completed_successfully }
+    networks: [mail, antispam, db-net, dns-net]
 
   postfix-strict:
     build: ../../postfix
     hostname: postfix-strict.test.local
     environment:
-      GREYLIST:       postgrey
-      OPENDKIM:       opendkim-strict
-      OPENDMARC:      opendmarc
+      RSPAMD:         rspamd-strict
       DOMAIN:         test.local
       HOSTNAME:       mail.test.local
       HOSTROOT:       test.local
@@ -184,24 +213,20 @@ services:
       DISABLE_DNSBL:  "yes"
       MYNETWORKS:     "127.0.0.0/8"
     dns: ["10.100.0.2"]
+    volumes:
+      - letsencrypt:/etc/letsencrypt:ro
     depends_on:
-      postfixadmin-db:
-        condition: service_healthy
-      opendkim-strict:
-        condition: service_healthy
-      opendmarc:
-        condition: service_healthy
-      dns:
-        condition: service_healthy
-    networks: [mail, greylisting, db-net, dkim-net, dns-net]
+      postfixadmin-db: { condition: service_healthy }
+      rspamd-strict:   { condition: service_healthy }
+      dns:             { condition: service_healthy }
+      certs-init:      { condition: service_completed_successfully }
+    networks: [mail, antispam, db-net, dns-net]
 
   postfix-log:
     build: ../../postfix
     hostname: postfix-log.test.local
     environment:
-      GREYLIST:       postgrey
-      OPENDKIM:       opendkim-log
-      OPENDMARC:      opendmarc-log
+      RSPAMD:         rspamd-log
       DOMAIN:         test.local
       HOSTNAME:       mail.test.local
       HOSTROOT:       test.local
@@ -212,16 +237,14 @@ services:
       DISABLE_DNSBL:  "yes"
       MYNETWORKS:     "127.0.0.0/8"
     dns: ["10.100.0.2"]
+    volumes:
+      - letsencrypt:/etc/letsencrypt:ro
     depends_on:
-      postfixadmin-db:
-        condition: service_healthy
-      opendkim-log:
-        condition: service_healthy
-      opendmarc-log:
-        condition: service_healthy
-      dns:
-        condition: service_healthy
-    networks: [mail, greylisting, db-net, dkim-net, dns-net]
+      postfixadmin-db: { condition: service_healthy }
+      rspamd-log:      { condition: service_healthy }
+      dns:             { condition: service_healthy }
+      certs-init:      { condition: service_completed_successfully }
+    networks: [mail, antispam, db-net, dns-net]
 
   dovecot:
     build: ../../dovecot
@@ -235,29 +258,16 @@ services:
       # PostfixAdmin's php_crypt ($6$…) hashes stored in the shared database
     volumes:
       - maildata:/var/mail/domains
+      - letsencrypt:/etc/letsencrypt:ro
     depends_on:
-      postfixadmin-db:
-        condition: service_healthy
-    networks: [mail, db-net]
+      postfixadmin-db: { condition: service_healthy }
+      rspamd:          { condition: service_healthy }
+      certs-init:      { condition: service_completed_successfully }
+    networks: [mail, antispam, db-net]
 
-  postgrey:
-    build: ../../postgrey
-    command: ["-w", "5"]
-    volumes:
-      - ./greylist.conf:/etc/milter-greylist/greylist.conf:ro
-    networks: [greylisting]
-    dns_opt:
-      - "timeout:1"
-      - "attempts:1"
-    healthcheck:
-      test: ["CMD-SHELL", "nc -w2 127.0.0.1 10025 </dev/null"]
-      interval: 2s
-      timeout: 5s
-      retries: 15
-      start_period: 3s
-
+  # foreign image — built and tested in its own repository
   fake-smtp:
-    build: ../../../fake-smtp
+    image: mwaeckerlin/fake-smtp
     volumes:
       - fake-mails:/mails
     networks: [mail]
@@ -293,8 +303,7 @@ services:
       MAXQUOTA:               "10"
       DOMAIN_QUOTA_DEFAULT:   "2048"
     depends_on:
-      postfixadmin-db:
-        condition: service_healthy
+      postfixadmin-db: { condition: service_healthy }
     networks: [ui-net]
 
   postfixadmin-proxy:
@@ -311,14 +320,18 @@ services:
       - snappymail-data:/data
     networks: []
 
+  # Built with SKIP_GPG_VERIFY=1: this repo ships a placeholder signing
+  # key on purpose; the strict verification machinery itself is covered
+  # by test_snappymail_gpg_verify.py.
   snappymail:
     build:
       context: ../../rainloop
       dockerfile: Dockerfile.php-fpm
       target: php-fpm
+      args:
+        SKIP_GPG_VERIFY: "1"
     depends_on:
-      snappymail-init:
-        condition: service_completed_successfully
+      snappymail-init: { condition: service_completed_successfully }
     volumes:
       - snappymail-data:/app/data
     networks: [ui-net, mail]
@@ -335,31 +348,26 @@ services:
       context: .
       dockerfile: Dockerfile.playwright
     depends_on:
-      postfix:
-        condition: service_started
-      postfix-strict:
-        condition: service_started
-      postfix-log:
-        condition: service_started
-      dovecot:
-        condition: service_started
-      postgrey:
-        condition: service_healthy
-      postfixadmin-proxy:
-        condition: service_started
-      snappymail-proxy:
-        condition: service_started
+      postfix:            { condition: service_started }
+      postfix-strict:     { condition: service_started }
+      postfix-log:        { condition: service_started }
+      dovecot:            { condition: service_started }
+      postfixadmin-proxy: { condition: service_started }
+      snappymail-proxy:   { condition: service_started }
     environment:
       POSTFIX_HOST:        postfix
       POSTFIX_STRICT_HOST: postfix-strict
       POSTFIX_LOG_HOST:    postfix-log
       DOVECOT_HOST:        dovecot
-      OPENDKIM_HOST:       opendkim
-      SMTP_PORT:           "25"
+      RSPAMD_HOST:         rspamd
+      RSPAMD_STRICT_HOST:  rspamd-strict
+      RSPAMD_LOG_HOST:     rspamd-log
+      SMTP_PORT:          "25"
       IMAP_PORT:          "143"
       POP3_PORT:          "110"
       SIEVE_PORT:         "4190"
-      OPENDKIM_PORT:      "10026"
+      RSPAMD_PORT:        "11332"
+      RSPAMD_CTL_PORT:    "11334"
       MAIL_DOMAIN:        test.local
       ALICE_USER:         alice@test.local
       ALICE_PASS:         alicepass12
@@ -378,14 +386,13 @@ services:
       # DKIM test key used by the verify tests to sign as external.local; the
       # matching public key is published in dns/dnsmasq.conf
       - ./testkeys:/testkeys:ro
-    networks: [mail, ui-net]
+    networks: [mail, ui-net, antispam]
     command: ["pytest", "-v", "--tb=short"]
 
 networks:
   mail:
-  greylisting:
   db-net:
-  dkim-net:
+  antispam:
   dns-net:
     ipam:
       config:
@@ -397,5 +404,12 @@ volumes:
   dkim-keys:
   dkim-keys-strict:
   dkim-keys-log:
+  clamav-db:
+    # survives `docker compose down -v` — tests/run-e2e.sh creates it
+    # once; delete manually (docker volume rm mailservice-e2e-clamav-db)
+    # to reclaim the ~300 MB signature cache.
+    name: mailservice-e2e-clamav-db
+    external: true
   snappymail-data:
   maildata:
+  letsencrypt:

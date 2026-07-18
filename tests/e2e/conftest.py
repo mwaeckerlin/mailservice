@@ -1,8 +1,10 @@
 """Shared fixtures: connection details + wait-for-service helpers."""
 import os
 import socket
+import ssl
 import time
 import imaplib
+import poplib
 import smtplib
 import email.mime.text
 import urllib.request
@@ -11,18 +13,46 @@ import uuid
 import pytest
 
 
+# dovecot forbids cleartext auth by default (auth_allow_cleartext=no), so
+# every login must run over TLS. The e2e certs-init container provides a
+# self-signed cert, so a non-verifying context is used for the handshake.
+def insecure_tls_ctx() -> ssl.SSLContext:
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
+def imap_starttls():
+    """A connected IMAP4 with STARTTLS already negotiated — ready for
+    .login(). Use instead of imaplib.IMAP4(...) everywhere auth follows."""
+    conn = imaplib.IMAP4(DOVECOT, IMAP_P)
+    conn.starttls(ssl_context=insecure_tls_ctx())
+    return conn
+
+
+def pop3_stls():
+    """A connected POP3 with STLS already negotiated — ready for USER/PASS."""
+    conn = poplib.POP3(DOVECOT, POP3_P)
+    conn.stls(context=insecure_tls_ctx())
+    return conn
+
+
 # ----------------------------------------------------------------- Config ---
 
 POSTFIX        = os.environ.get("POSTFIX_HOST",         "postfix")
 POSTFIX_STRICT = os.environ.get("POSTFIX_STRICT_HOST",  "postfix-strict")
 POSTFIX_LOG    = os.environ.get("POSTFIX_LOG_HOST",     "postfix-log")
 DOVECOT        = os.environ.get("DOVECOT_HOST",         "dovecot")
-OPENDKIM       = os.environ.get("OPENDKIM_HOST",        "")
+RSPAMD         = os.environ.get("RSPAMD_HOST",          "rspamd")
+RSPAMD_STRICT  = os.environ.get("RSPAMD_STRICT_HOST",   "rspamd-strict")
+RSPAMD_LOG     = os.environ.get("RSPAMD_LOG_HOST",      "rspamd-log")
 SMTP_P    = int(os.environ.get("SMTP_PORT",     "25"))
 IMAP_P    = int(os.environ.get("IMAP_PORT",    "143"))
 POP3_P    = int(os.environ.get("POP3_PORT",    "110"))
 SIEVE_P   = int(os.environ.get("SIEVE_PORT", "4190"))
-OPENDKIM_P = int(os.environ.get("OPENDKIM_PORT", "10026"))
+RSPAMD_P    = int(os.environ.get("RSPAMD_PORT",     "11332"))
+RSPAMD_CP   = int(os.environ.get("RSPAMD_CTL_PORT", "11334"))
 DOMAIN    = os.environ.get("MAIL_DOMAIN",   "test.local")
 ALICE     = os.environ.get("ALICE_USER",    f"alice@{DOMAIN}")
 ALICE_PW  = os.environ.get("ALICE_PASS",    "alicepass12")
@@ -73,13 +103,72 @@ def build_message(subject: str, body: str = "test body",
     return msg.as_string()
 
 
+# rspamd greylisting is score-based: a mail with mildly-suspicious
+# signals (the test HELO alone scores 3.0) can cross the greylist
+# threshold and get a 451. A real MTA queues and retries — the test
+# sender does the same. The e2e stack runs RSPAMD_GREYLIST_TIMEOUT=5s.
+GREYLIST_RETRY_DELAY = 6
+
+
+def _tempfail_code(exc: Exception):
+    if isinstance(exc, smtplib.SMTPRecipientsRefused):
+        return list(exc.recipients.values())[0][0]
+    return getattr(exc, "smtp_code", None)
+
+
+def send_raw(host: str, sender: str, to: str, raw: bytes,
+             helo: str | None = None, retries: int = 2):
+    """Low-level mail/rcpt/data submission returning (accepted, resp).
+
+    4xx tempfails (greylisting) are retried after the greylist delay,
+    like any real MTA; a permanent 5xx (or acceptance) returns
+    immediately. DATA is never attempted after a failed RCPT — that
+    would trip postfix's smtpd_hard_error_limit into a 421 that masks
+    the actual verdict.
+    """
+    last = (False, "no attempt made")
+    for _ in range(retries + 1):
+        tempfail = False
+        try:
+            with smtplib.SMTP(host, SMTP_P, timeout=15) as s:
+                s.ehlo(helo or f"testhost.{DOMAIN}")
+                code, resp = s.mail(sender)
+                if code < 400:
+                    code, resp = s.rcpt(to)
+                if code < 400:
+                    code, resp = s.data(raw)
+                last = (200 <= code < 400, f"{code} {resp!r}")
+                tempfail = 400 <= code < 500
+        except smtplib.SMTPResponseException as e:
+            last = (False, f"{e.smtp_code} {e.smtp_error!r}")
+            tempfail = 400 <= e.smtp_code < 500
+        if not tempfail:
+            return last
+        time.sleep(GREYLIST_RETRY_DELAY)
+    return last
+
+
 def smtp_send(subject: str, to: str = ALICE,
-              from_: str = SENDER, body: str = "test") -> str:
-    """Send a mail and return the subject (for IMAP search)."""
-    with smtplib.SMTP(POSTFIX, SMTP_P) as s:
-        s.ehlo(f"testhost.{DOMAIN}")
-        s.sendmail(from_, [to], build_message(subject, body, from_, to))
-    return subject
+              from_: str = SENDER, body: str = "test",
+              retries: int = 2) -> str:
+    """Send a mail and return the subject (for IMAP search). Retries
+    4xx tempfails (greylisting) after the greylist delay, like any
+    real MTA; permanent errors raise immediately."""
+    last = None
+    for _ in range(retries + 1):
+        try:
+            with smtplib.SMTP(POSTFIX, SMTP_P) as s:
+                s.ehlo(f"testhost.{DOMAIN}")
+                s.sendmail(from_, [to], build_message(subject, body, from_, to))
+            return subject
+        except (smtplib.SMTPResponseException,
+                smtplib.SMTPRecipientsRefused) as e:
+            code = _tempfail_code(e)
+            if code is None or not 400 <= code < 500:
+                raise
+            last = e
+            time.sleep(GREYLIST_RETRY_DELAY)
+    raise last
 
 
 # --------------------------------------------------------- Fixtures --------
@@ -92,8 +181,12 @@ def wait_for_services():
     wait_for_port(DOVECOT, IMAP_P)
     wait_for_port(DOVECOT, POP3_P)
     wait_for_port(DOVECOT, SIEVE_P)
-    # opendkim(-strict): guaranteed healthy by docker-compose before postfix
-    # starts; test-runner does not need direct access to port 10026.
+    # rspamd(-strict|-log): controller port; healthchecks in compose
+    # already gate postfix startup on rspamd readiness, but tests use
+    # the controller directly (bayes-learn, scan API) so wait too.
+    wait_for_port(RSPAMD,        RSPAMD_CP)
+    wait_for_port(RSPAMD_STRICT, RSPAMD_CP)
+    wait_for_port(RSPAMD_LOG,    RSPAMD_CP)
     time.sleep(3)
 
 
@@ -158,7 +251,7 @@ def provision_mail_accounts(wait_for_services, browser):
 
 @pytest.fixture
 def imap_alice():
-    with imaplib.IMAP4(DOVECOT, IMAP_P) as conn:
+    with imap_starttls() as conn:
         conn.login(ALICE, ALICE_PW)
         yield conn
 

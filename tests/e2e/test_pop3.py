@@ -1,12 +1,14 @@
-"""POP3 access tests."""
+"""POP3 access tests — over STLS, because dovecot forbids cleartext auth
+by default (auth_allow_cleartext=no): USER/PASS is only accepted on an
+encrypted connection."""
 import poplib
 import time
 import pytest
-from conftest import DOVECOT, POP3_P, ALICE, ALICE_PW, smtp_send
+from conftest import POP3_P, ALICE, ALICE_PW, smtp_send, pop3_stls
 
 
 def test_pop3_login():
-    conn = poplib.POP3(DOVECOT, POP3_P)
+    conn = pop3_stls()
     resp = conn.user(ALICE)
     assert resp.startswith(b"+OK")
     resp = conn.pass_(ALICE_PW)
@@ -15,7 +17,7 @@ def test_pop3_login():
 
 
 def test_pop3_wrong_password_rejected():
-    conn = poplib.POP3(DOVECOT, POP3_P)
+    conn = pop3_stls()
     conn.user(ALICE)
     with pytest.raises(poplib.error_proto):
         conn.pass_("wrongpassword")
@@ -26,7 +28,7 @@ def test_pop3_list_and_retrieve(unique_subject):
     """Mail delivered via SMTP is listed and retrievable via POP3."""
     smtp_send(unique_subject)
     time.sleep(3)
-    conn = poplib.POP3(DOVECOT, POP3_P)
+    conn = pop3_stls()
     conn.user(ALICE)
     conn.pass_(ALICE_PW)
     _, msgs, _ = conn.list()
@@ -44,7 +46,7 @@ def test_pop3_stat(unique_subject):
     """STAT returns message count and total size."""
     smtp_send(unique_subject)
     time.sleep(3)
-    conn = poplib.POP3(DOVECOT, POP3_P)
+    conn = pop3_stls()
     conn.user(ALICE)
     conn.pass_(ALICE_PW)
     count, size = conn.stat()

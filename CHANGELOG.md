@@ -3,6 +3,160 @@
 All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [3.0.0]
+
+### ⚠️ BREAKING — mail filtering stack replaced
+
+v3.0.0 retires the historical multi-container antispam chain
+(`opendkim`, `opendmarc`, `postgrey`, `postfix-policyd-spf-perl`)
+and replaces it with **one `rspamd`** container, backed by a headless
+`redis` for state and `clamav` for antivirus. Rspamd does DKIM
+signing, DKIM verify, DMARC, SPF, greylisting, Bayes-scored spam
+and virus scanning through a single milter port.
+
+**If your existing `docker-compose.yml` still names `opendkim`,
+`opendmarc`, `postgrey` or the old milter envs on `postfix`** it will
+fail to boot until you migrate. See the README section «Upgrading
+from v2.x (opendkim + opendmarc + postgrey + policyd-spf)» — three
+services to swap, one DKIM-key volume rename, no DNS change.
+
+### Added
+- `mwaeckerlin/rspamd` — headless three-stage scratch image with a
+  compiled C++ `init` that generates one 2048-bit DKIM key per
+  domain on first start (via `rspamadm dkim_keygen`), stages
+  `local.d/*.conf` from templates according to `DKIM_DMARC`, and
+  optionally mails the DNS TXT records to `NOTIFY_EMAIL` via a
+  minimal in-process SMTP client.
+- `mwaeckerlin/redis` — headless three-stage scratch image (only
+  `redis-server`, no `redis-cli`). AOF persistence + `allkeys-lfu`
+  eviction defaults; backs rspamd's Bayes / greylist / ratelimit
+  state.
+- `mwaeckerlin/clamav` — three-stage image running `clamd` +
+  `freshclam --daemon` under a supervising C++ `init` (bootstraps
+  the DB, keeps freshclam running as a child, execs into clamd as
+  PID 1).
+- SnappyMail release tarball is now OpenPGP-verified against a key
+  pinned in `rainloop/snappymail-signing-key.asc` at build time;
+  the build refuses a tarball that does not verify. `SKIP_GPG_VERIFY=1`
+  build-arg exists solely for the e2e stack, which ships the
+  placeholder key on purpose.
+- OpenPGP in the webmail: the SnappyMail image ships the php-gnupg
+  extension (compiled from the pinned upstream release) plus the gpg
+  binary it drives — verifying signed mail and signing/encrypting
+  outgoing mail works without extra installation.
+- `RSPAMD_LOG_LEVEL` env on rspamd (default `notice`; `info` shows
+  every learn/scan decision — used by the e2e stack for diagnosable
+  failure logs).
+- Bayes autotraining via dovecot's `imap_sieve`: moving mail into or
+  out of the `Junk` folder in any IMAP client fires
+  `sieve/learn-{spam,ham}.sieve` → `rspamc learn_{spam,ham}` against
+  the sibling rspamd controller. Event-driven, no cron.
+- `SPAM_DELIVERY_MODE` env on dovecot: `reject` (default; mailservice
+  design), `mark` (add `X-Spam-Flag` etc. headers, never touch the
+  body / subject to protect the sender's DKIM signature), `folder`
+  (server-side sieve routes to IMAP «Junk», silent quarantine, not
+  recommended).
+- README section «Antispam, antivirus, signing — one rspamd» plus
+  «Antivirus (ClamAV)», «Bayes-scored spam and autotraining»,
+  «SPAM_DELIVERY_MODE» and legal-framing note on «SMTP-reject vs.
+  Aufbewahrungspflicht».
+- e2e tests: `test_virus_reject.py` (clamd INSTREAM probe + EICAR
+  inline in the body + EICAR as attachment),
+  `test_spam_score_reject.py` (GTUBE + clean-mail sanity),
+  `test_bayes_autolearn.py` (Bayes counter advances on IMAP move
+  to/from Junk), `test_delivery_mode.py` (reject-mode contract),
+  `test_snappymail_gpg_verify.py` (positive + tampered-tarball +
+  unknown-key cases of the GPG-verify machinery), and a php-gnupg
+  image contract check.
+- e2e now also exercises TLS end-to-end (`test_tls.py`): a `certs-init`
+  container drops a self-signed cert into the `letsencrypt` volume so
+  the cert-present → TLS-enabled wiring is tested — STARTTLS on SMTP,
+  authenticated submission over STARTTLS, IMAPS on 993, IMAP STARTTLS
+  on 143.
+
+### Changed
+- **Delivery-affecting limits are now high, configurable and
+  documented** — a legitimate mail is never bounced by an artificial
+  default:
+  - `postfix`: `message_size_limit` and `smtpd_hard_error_limit` are no
+    longer hardcoded. New env `MESSAGE_SIZE_LIMIT` (bytes, default
+    **100 GiB** so even several photos/videos in one mail pass, `0` =
+    unlimited; `mailbox_size_limit` is pinned to the same value) and
+    `SMTP_HARD_ERROR_LIMIT` (default raised to the postfix standard 20 —
+    the previous value of 1 turned a single protocol hiccup into an
+    abrupt 421).
+  - `clamav`: scan limits raised to clamav's architectural maxima
+    (`CLAMD_MAX_FILESIZE` 2 GiB — clamav's internal hard cap,
+    `CLAMD_MAX_SCANSIZE` 4 GiB) and the previously-unset
+    `CLAMD_STREAM_MAXLENGTH` (4 GiB; clamd's own default is only 25 MB,
+    which silently aborted the Rspamd INSTREAM for larger mails).
+    Scanning is fail-open: a mail exceeding the limits — or larger than
+    clamav can scan at all (>2 GiB per file / >4 GiB per message, a
+    clamav architectural limit) — is delivered unscanned, never bounced.
+  - `rspamd`/`redis` documented as never rejecting on size; the only
+    reject knob remains the spam score vs. `RSPAMD_REJECT_SCORE` (15,
+    Rspamd's own conservative default; see rspamd README «Scores and
+    thresholds»).
+- `postfix`: `OPENDKIM`, `OPENDMARC` and `GREYLIST` env vars removed;
+  one new `RSPAMD` env (host or host:port, default port 11332).
+  `CHECK_SPF` auto-disables when `RSPAMD` is set — rspamd's SPF
+  module covers this and running policyd-spf-perl in parallel would
+  produce contradictory verdicts.
+- `dovecot`: adds `rspamd-client` to the build for the `rspamc`
+  binary used by the Bayes-autotrainer sieve wrappers. `imap_sieve`
+  and `sieve_extprograms` are now wired in `local.conf`. `start.sh`
+  writes `/etc/dovecot/sieve/spam-to-junk.sieve` from
+  `SPAM_DELIVERY_MODE` at start-up.
+- `DKIM_DMARC` semantics preserved (off/log/permissive/reject) —
+  same four modes, same behaviour contract, now enforced by rspamd
+  instead of opendkim + opendmarc (bad-signature rejection via a
+  force-action rule, DMARC `p=reject` enforcement via the DMARC
+  module's reject action).
+- **Greylisting is now score-based** (semantic change): postgrey
+  delayed every unknown sender triplet with a 4xx; rspamd's greylist
+  module only delays mail whose spam score crosses the greylist
+  threshold. Clean mail from first-time senders is delivered on the
+  first attempt — aligned with the «reliability over filtering»
+  design. Own users (SASL) remain exempt in all cases.
+- The e2e stack now runs three parallel rspamd instances (one per
+  DKIM_DMARC mode) sharing one redis and one clamav, replacing the
+  three parallel opendkim + opendmarc pairs of v2.x. Greylist
+  timeouts / expires and the local-IP-check flag are env-driven so
+  the test suite can shrink the delay from 300 s to 5 s without
+  patching the rspamd config.
+- `postfix/README.md` remains minimal — the RSPAMD env is documented
+  in the Dockerfile's ENV block and in the mailservice compose.
+- **Authentication is now encrypted-only by default.** Dovecot
+  `auth_allow_cleartext` defaults to `no` (new `DOVECOT_ALLOW_CLEARTEXT`
+  env), so the cleartext PLAIN/LOGIN mechanisms are offered only over
+  TLS — a client must use IMAPS/POP3S/managesieve-TLS or issue STARTTLS
+  before authenticating, and a password is never transmitted in the
+  clear. Postfix keeps `smtpd_tls_auth_only=yes`, so SMTP submission
+  SASL is likewise TLS-only. Soften only deliberately via
+  `DOVECOT_ALLOW_CLEARTEXT=yes` (e.g. a trusted isolated network without
+  certificates); see the dovecot and mailservice READMEs.
+
+### Removed
+- Submodule pointers: `opendkim`, `opendmarc`, `postgrey`. The
+  filter chain lives entirely in `rspamd` + `redis` + `clamav`.
+- `postfix-policyd-spf-perl` is still installed in the postfix image
+  for backward compatibility (`CHECK_SPF=yes` overrides the auto-off)
+  but is no longer wired by default.
+- `tests/dkim-dmarc-mode.sh` and `tests/opendkim-multidomain.sh`
+  (opendkim/opendmarc conf-based shell tests, obsolete under rspamd).
+
+### Security
+- The `postfixadmin` image carries a **documented, time-bounded
+  workaround** for two upstream `spomky-labs/otphp` advisories
+  (`GHSA-g7m4-839x-ch6v` HIGH, `GHSA-2jx3-65f3-xr8r` MEDIUM) that are
+  unfixed in the version PostfixAdmin pins. A code audit shows the
+  vulnerable code paths (`Factory::loadFromProvisioningUri`) are not
+  reachable — PostfixAdmin only ever *creates* TOTP secrets and
+  provisioning URIs. The build therefore proceeds with the audited
+  version, and a build-time guard re-surfaces the issue for review if
+  upstream still has not fixed it by 2026-08-16. See README «Security
+  workarounds».
+
 ## [2.0.0]
 
 ### ⚠️ BREAKING — please read before upgrading

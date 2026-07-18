@@ -19,19 +19,16 @@ services:
       DOMAIN:    localhost
       HOSTNAME:  localhost
       HOSTROOT:  localhost
-      OPENDKIM:  opendkim
       RELAYHOST: fake-smtp   # all outbound mail caught by fake-smtp
     networks:
       - postfix-backend
-      - greylisting
+      - antispam
       - fakesmtp-net
-      - dkim-net
 
-  opendkim:
+  # rspamd signs / verifies for the local dev domain
+  rspamd:
     environment:
       DOMAIN: localhost
-    networks:
-      - dkim-net
 
   dovecot:
     ports:
@@ -41,13 +38,17 @@ services:
       - "1995:995"   # POP3S
       - "4190:4190"  # ManageSieve
 
-  # Webmailer
+  # Webmailer — rainloop is a mailservice submodule (subdirectory), so
+  # this is an own-image build with no `../` context. SKIP_GPG_VERIFY=1
+  # because the repo ships only a placeholder release-signing key.
   snappymail:
     image: mwaeckerlin/snappymail:php-fpm
     build:
       context: rainloop
       dockerfile: Dockerfile.php-fpm
       target: php-fpm
+      args:
+        SKIP_GPG_VERIFY: "1"
     volumes:
       - snappymail-data:/app/snappymail/data
     networks:
@@ -64,10 +65,11 @@ services:
     networks:
       - snappymail-net
 
-  # Catch all outbound mail — nothing reaches the internet
+  # Catch all outbound mail — nothing reaches the internet.
+  # mwaeckerlin/fake-smtp is a foreign image: built and tested in its
+  # own repository; locally built image wins, hub pull otherwise.
   fake-smtp:
     image: mwaeckerlin/fake-smtp
-    build: ../fake-smtp
     ports:
       - "2526:25"    # optional: send test mails directly to fake-smtp
     volumes:

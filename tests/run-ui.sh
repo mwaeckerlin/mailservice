@@ -13,11 +13,16 @@ cleanup() {
 trap cleanup EXIT
 
 echo "==> Building UI test stack..."
+# The test compose builds the mailservice-own images (verifying their
+# build); foreign images (mwaeckerlin/redis, mwaeckerlin/fake-smtp)
+# come via `image:`.
+docker volume create mailservice-e2e-clamav-db >/dev/null
 docker compose -f "$BASE" -f "$OVERLAY" build --quiet
 
 echo "==> Starting services..."
 docker compose -f "$BASE" -f "$OVERLAY" up -d --remove-orphans \
-    postfix dovecot postgrey opendkim dns db fake-smtp \
+    redis clamav rspamd \
+    postfix dovecot dns fake-smtp \
     postfixadmin-db postfixadmin postfixadmin-proxy \
     snappymail snappymail-proxy
 

@@ -16,11 +16,15 @@ cd "$(dirname "$0")/.."
 FILES=(-f tests/e2e/docker-compose.yml -f tests/e2e/docker-compose.manual.yml)
 
 echo "==> Building stack..."
+# The e2e base compose builds the mailservice-own images; foreign
+# images (mwaeckerlin/redis, mwaeckerlin/fake-smtp) come via `image:`.
+docker volume create mailservice-e2e-clamav-db >/dev/null
 docker compose "${FILES[@]}" build
 
 echo "==> Starting services (without the automated test-runner)..."
 docker compose "${FILES[@]}" up -d --remove-orphans \
-    postfix dovecot postgrey opendkim dns fake-smtp \
+    redis clamav rspamd \
+    postfix dovecot dns fake-smtp \
     postfixadmin-db postfixadmin postfixadmin-proxy \
     snappymail snappymail-proxy
 

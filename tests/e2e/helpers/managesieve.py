@@ -1,6 +1,7 @@
 """Minimal ManageSieve client (RFC 5804) using only stdlib."""
 import base64
 import socket
+import ssl
 import re
 
 
@@ -9,10 +10,29 @@ class ManageSieveError(Exception):
 
 
 class ManageSieveClient:
-    def __init__(self, host: str, port: int = 4190, timeout: int = 10):
+    def __init__(self, host: str, port: int = 4190, timeout: int = 10,
+                 use_tls: bool = True):
         self._sock = socket.create_connection((host, port), timeout=timeout)
         self._buf = b""
         self._capabilities: dict[str, str] = {}
+        self._read_capabilities()
+        # dovecot forbids cleartext auth by default, so AUTHENTICATE is
+        # only allowed after STARTTLS. Upgrade before doing anything else.
+        if use_tls:
+            self._starttls()
+
+    def _starttls(self) -> None:
+        self._send("STARTTLS")
+        status, msg = self._read_response()
+        if status != "OK":
+            raise ManageSieveError(f"STARTTLS failed: {msg}")
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        self._sock = ctx.wrap_socket(self._sock)
+        # after TLS the server re-issues its capability block
+        self._buf = b""
+        self._capabilities = {}
         self._read_capabilities()
 
     # ------------------------------------------------------------------ I/O --
