@@ -50,7 +50,9 @@ services:
       args:
         SKIP_GPG_VERIFY: "1"
     volumes:
-      - snappymail-data:/app/snappymail/data
+      # /app/data is the declared data volume of the php-fpm image —
+      # any other path silently loses configuration and accounts
+      - snappymail-data:/app/data
     networks:
       - postfix-backend
       - snappymail-net
@@ -60,6 +62,10 @@ services:
     build:
       context: rainloop
       dockerfile: Dockerfile.nginx
+      args:
+        # placeholder signing key in this repo — same escape hatch as
+        # the snappymail (php-fpm) build above
+        SKIP_GPG_VERIFY: "1"
     ports:
       - "8081:8080"  # Webmailer → http://localhost:8081
     networks:

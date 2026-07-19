@@ -32,7 +32,7 @@ echo "==> Running image contract tests..."
 bash tests/image-contract.sh \
     e2e-rspamd e2e-rspamd-strict e2e-rspamd-log \
     e2e-clamav \
-    e2e-postfix e2e-postfix-strict e2e-postfix-log \
+    e2e-postfix e2e-postfix-strict e2e-postfix-log e2e-postfix-nocert \
     e2e-dovecot \
     e2e-smtp-relay e2e-smtp-relay-tls e2e-mailforward \
     e2e-postfixadmin e2e-postfixadmin-proxy e2e-snappymail e2e-snappymail-proxy
@@ -42,7 +42,7 @@ echo "==> Starting services..."
 docker compose -f "$COMPOSE" up -d --remove-orphans \
     redis clamav \
     rspamd rspamd-strict rspamd-log \
-    postfix postfix-strict postfix-log \
+    postfix postfix-strict postfix-log postfix-nocert \
     dovecot dns fake-smtp \
     smtp-relay smtp-relay-tls mailforward \
     postfixadmin-db postfixadmin postfixadmin-proxy \
@@ -50,7 +50,10 @@ docker compose -f "$COMPOSE" up -d --remove-orphans \
 
 echo "==> Running tests..."
 EXIT=0
-docker compose -f "$COMPOSE" run --rm test-runner "$@" || EXIT=$?
+# `compose run` with arguments REPLACES the service command entirely —
+# prepend the pytest invocation so `bash tests/run-e2e.sh -k foo`
+# actually selects tests instead of exec'ing "-k" as the entrypoint.
+docker compose -f "$COMPOSE" run --rm test-runner pytest -v --tb=short "$@" || EXIT=$?
 
 echo "==> Collecting logs on failure..."
 if [[ $EXIT -ne 0 ]]; then

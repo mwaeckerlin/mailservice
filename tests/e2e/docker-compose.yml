@@ -251,6 +251,29 @@ services:
       certs-init:      { condition: service_completed_successfully }
     networks: [mail, antispam, db-net, dns-net]
 
+  # No TLS certificate on purpose: pins the no-cert secure default of
+  # the postfix image — SASL must be disabled entirely (stack invariant:
+  # passwords never travel unencrypted; same behaviour as dovecot, where
+  # a stack without a certificate has no usable login). See
+  # test_tls.py::test_smtp_auth_disabled_without_cert.
+  postfix-nocert:
+    build: ../../postfix
+    hostname: postfix-nocert.test.local
+    environment:
+      DOMAIN:         test.local
+      HOSTNAME:       mail.test.local
+      HOSTROOT:       test.local
+      DB_HOST:        postfixadmin-db
+      DB_USER:        postfixadmin
+      DB_PASSWORD:    testpass
+      DB_NAME:        postfixadmin
+      DISABLE_DNSBL:  "yes"
+      MYNETWORKS:     "127.0.0.0/8"
+    depends_on:
+      postfixadmin-db: { condition: service_healthy }
+      dovecot:         { condition: service_started }
+    networks: [mail, db-net]
+
   dovecot:
     build: ../../dovecot
     environment:
@@ -396,6 +419,10 @@ services:
     build:
       context: ../../rainloop
       dockerfile: Dockerfile.nginx
+      args:
+        # this repo ships a placeholder signing key on purpose — same
+        # escape hatch as the snappymail (php-fpm) build above
+        SKIP_GPG_VERIFY: "1"
     depends_on: [snappymail]
     networks: [ui-net]
 
@@ -407,6 +434,7 @@ services:
       postfix:            { condition: service_started }
       postfix-strict:     { condition: service_started }
       postfix-log:        { condition: service_started }
+      postfix-nocert:     { condition: service_started }
       dovecot:            { condition: service_started }
       postfixadmin-proxy: { condition: service_started }
       snappymail-proxy:   { condition: service_started }
@@ -417,6 +445,7 @@ services:
       POSTFIX_HOST:        postfix
       POSTFIX_STRICT_HOST: postfix-strict
       POSTFIX_LOG_HOST:    postfix-log
+      POSTFIX_NOCERT_HOST: postfix-nocert
       DOVECOT_HOST:        dovecot
       RSPAMD_HOST:         rspamd
       RSPAMD_STRICT_HOST:  rspamd-strict

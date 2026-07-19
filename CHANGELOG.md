@@ -3,6 +3,62 @@
 All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [3.2.0]
+
+### Fixed — database persistence and engine
+
+- The production compose mounted the account database volume at
+  `/usr/lib/mysql` instead of `/var/lib/mysql` — the volume persisted
+  **nothing**: every container recreate silently dropped all domains,
+  mailboxes and password hashes. The volume now targets the real data
+  directory, pinned by a new compose-contract check.
+- The database service now runs `mariadb:11` (the stack requirement —
+  Dovecot 2.4 needs the TLS the 11.x server offers, see README
+  «Database version») instead of a rolling `mysql` image whose 8.4
+  release additionally removed the `--default-authentication-plugin`
+  switch the compose passed (start-up failure on next pull). Also
+  pinned by the compose contract.
+
+### Changed — security hardening across the stack
+
+- Without a TLS certificate the postfix image no longer offers SASL
+  authentication at all (stack invariant: passwords never travel
+  unencrypted; same behaviour as dovecot). Deliberately TLS-less
+  deployments can opt in via `POSTFIX_ALLOW_CLEARTEXT_AUTH=yes`.
+  Pinned by a new e2e scenario (`postfix-nocert`) with valid
+  credentials.
+- Every image of the postfix family (`postfix`, `smtp-relay`,
+  `smtp-relay-tls`, `mailforward`) and rspamd now whitelist-validates
+  every environment value before rendering it into configuration files
+  — a malformed value (embedded newline: config injection) refuses to
+  start with a clear `invalid <VAR>` error. Each submodule carries its
+  own config-validation test suite.
+- The SnappyMail **nginx** image now verifies the release tarball's
+  OpenPGP signature against the pinned key exactly like the php-fpm
+  image — it serves all JavaScript the browser executes and previously
+  downloaded without any check.
+- The relay family's TLS setup is modernised: deprecated
+  `smtpd_use_tls`/`smtpd_tls_eecdh_grade` knobs and the frozen 2015-era
+  cipher list are gone, the protocol floor is TLS 1.2 (opportunistic —
+  a legacy sender without TLS 1.2 falls back to plaintext and the mail
+  still arrives).
+- The PostfixAdmin admin UI (plain HTTP) is published on loopback only;
+  remote access goes through a TLS reverse proxy (README «Trade-off —
+  admin UI without TLS»). Pinned by the compose contract.
+
+### Fixed — test harness
+
+- `tests/run-e2e.sh` forwards pytest arguments again: `docker compose
+  run` replaces the service command entirely, so `-k <test>` used to be
+  exec'd as the entrypoint instead of selecting tests.
+
+### Documentation
+
+- README v2 leftovers corrected: the component overview names rspamd
+  (not OpenDKIM/milter-greylist), the roadmap note «virus scanning is
+  planned» is replaced by the integrated ClamAV description, and the
+  `NOTIFY_SMTP` example reflects the numeric-IPv4 requirement.
+
 ## [3.1.0]
 
 ### Changed — every image in the stack is now headless

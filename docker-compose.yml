@@ -3,7 +3,11 @@ services:
     image: mwaeckerlin/postfixadmin-proxy
     build: postfixadmin-proxy
     ports:
-      - 8080:8080
+      # loopback only: the admin UI speaks plain HTTP (setup and login
+      # passwords would travel unencrypted) — put a TLS reverse proxy
+      # (e.g. mwaeckerlin/reverse-proxy) in front for remote access.
+      # See README «Trade-off — admin UI without TLS».
+      - "127.0.0.1:8080:8080"
     networks:
       - postfixadmin-frontend
 
@@ -38,17 +42,24 @@ services:
 
 
   postfixadmin-db:
-    image: mysql
-    command: mysqld --default-authentication-plugin=mysql_native_password
+    # mariadb 11+ is a stack requirement (dovecot 2.4 TLS, see README)
+    # and matches the e2e stack; a rolling `mysql` image additionally
+    # breaks on 8.4 where --default-authentication-plugin was removed.
+    # Foreign image on purpose: no hardened mwaeckerlin/ database image
+    # exists (documented exception, see README).
+    image: mariadb:11
     environment:
       MYSQL_RANDOM_ROOT_PASSWORD: "yes"
       MYSQL_DATABASE: postfixadmin
       MYSQL_USER: postfixadmin
       MYSQL_PASSWORD: eepaiph3ohquai2Eilae-change-it
     volumes:
+      # /var/lib/mysql is where mariadb stores its data — a volume on
+      # any other path silently persists nothing (all accounts and
+      # password hashes gone on every recreate)
       - type: volume
         source: postfixadmin-db
-        target: /usr/lib/mysql
+        target: /var/lib/mysql
     networks:
       - postfixadmin-backend
       - postfix-backend
@@ -116,10 +127,13 @@ services:
       REDIS_HOST: redis
       CLAMAV_HOST: clamav
       # Optional: send an operator mail whenever a new DKIM key is
-      # generated on start-up (init.cpp connects directly to postfix
-      # via minimal in-process SMTP). Empty = only stdout log.
+      # generated on start-up (init.cpp speaks a minimal in-process
+      # SMTP dialogue). Empty = only stdout log. NOTIFY_SMTP must be a
+      # NUMERIC IPv4 address — the init helper does no DNS lookup, so
+      # a service name like "postfix:25" does not work (give the
+      # postfix service a fixed address if you need this).
       # NOTIFY_EMAIL: "hostmaster@mrw.sh"
-      # NOTIFY_SMTP:  "postfix:25"
+      # NOTIFY_SMTP:  "127.0.0.1:25"
     volumes:
       - type: volume
         source: dkim-keys        # per-domain private keys — persist!
@@ -197,6 +211,10 @@ services:
     build: postfix
     ports:
       - "25:25"
+      # Trade-off: submission (587) currently maps onto the same smtpd
+      # as the MX port — auth is TLS-only either way, but a dedicated
+      # submission service (auth mandatory, TLS enforced, no MX
+      # restrictions) would separate the two roles cleanly. See README.
       - "587:25"
     environment:
       RSPAMD: rspamd               # host or host:port, default port 11332

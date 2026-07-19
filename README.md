@@ -10,7 +10,8 @@ your correspondence to a third-party mail provider.
 
 - **A complete suite, not just an MTA.** Postfix (SMTP/TLS), Dovecot
   (IMAP/POP3/Sieve), the **SnappyMail** webmail, the **PostfixAdmin** admin UI,
-  OpenDKIM, SPF and greylisting — wired together and ready to run.
+  and rspamd (DKIM, SPF, DMARC, greylisting, spam scoring, ClamAV antivirus) —
+  wired together and ready to run.
 - **Reliability over filtering.** Every message is either delivered to the
   recipient's INBOX or rejected with a clear, RFC-compliant SMTP error. No spam
   folder, no silent drops — mail never vanishes into a black hole (see
@@ -87,6 +88,17 @@ Wait until the database is initialized and outputs:
 Open in browser: http://localhost:8080/setup.php — wait a moment and create an admin.
 
 The configured setup password is `test123` — that's good for testing, not for production. To change it, set variable `SETUP_PASSWORD` in `docker compose.yml` to anything else, e.g.: `SETUP_PASSWORD: ChangeMe` before you open http://localhost:8080/setup.php the first time (or delete the database, see below), then follow the instructions on the page and you get a new hash to set in `SETUP_DATABASE`.
+
+The same applies to the demo `DATABASE_PASSWORD` (`…-change-it`) shared
+by PostfixAdmin, Postfix, Dovecot and the database service: change it
+everywhere before going to production.
+
+**Trade-off — admin UI without TLS:** the PostfixAdmin proxy speaks
+plain HTTP, so the compose file publishes it on loopback only
+(`127.0.0.1:8080`) — the setup and admin login passwords must never
+travel unencrypted over a network. For remote access put a TLS reverse
+proxy (e.g. [mwaeckerlin/reverse-proxy](https://github.com/mwaeckerlin/reverse-proxy))
+in front, or tunnel via SSH. Pinned by `tests/compose-contract.sh`.
 
 Access rights for the volumes, if on a local filesystem, must be set to: `100:1000`
 
@@ -943,8 +955,8 @@ server) automatically until the mail is delivered or a permanent error occurs.
 - Only **real** (permanent) errors are reported — as a bounce message to the
   sender. Temporary errors are retried, never surfaced to the user.
 - Consequently, **greylisting never applies to our own users**: SASL-
-  authenticated clients and the internal container networks are whitelisted in
-  milter-greylist (the equivalent of `permit_sasl_authenticated,
+  authenticated clients and the internal container networks are exempt in
+  rspamd's greylist layer (the equivalent of `permit_sasl_authenticated,
   permit_mynetworks` preceding the former policy check). A greylisting `451`
   at submission would push the retry burden onto the human in front of the
   webmail — the opposite of this guarantee.
@@ -969,9 +981,9 @@ quarantine):
 > (Admin: check `_dmarc.<sender-domain>` policy, DKIM signature and SPF
 > alignment against `<From:>`.)`
 
-The current opendkim/opendmarc/greylist error strings are not yet
-uniformly at this level of detail — this is a follow-up feature that
-will refine the milter-side reject templates.
+The current rspamd reject messages are not yet uniformly at this level
+of detail — this is a follow-up feature that will refine the
+milter-side reject templates.
 
 ### Inbound: delivered or rejected — nothing in between
 
@@ -989,7 +1001,7 @@ This guarantee holds as long as the sender's infrastructure also follows the RFC
 | Component | Behaviour on rejection |
 |-----------|----------------------|
 | Postfix restrictions (invalid HELO, unknown domain, relay attempt, RBL hit) | `5xx` permanent rejection — sender informed immediately |
-| Greylisting (milter-greylist) | `4xx` temporary deferral — RFC-compliant, sender retries automatically |
+| Greylisting (rspamd, score-based) | `4xx` temporary deferral — RFC-compliant, sender retries automatically |
 | SPF hard fail (`-all`) | `550` permanent rejection — sender informed |
 | SPF soft-fail (`~all`), neutral, none | `DUNNO` — mail passes through to INBOX |
 | SPF / DNS temporary error | `4xx` deferral — sender retries |
@@ -997,7 +1009,10 @@ This guarantee holds as long as the sender's infrastructure also follows the RFC
 
 There is deliberately **no spam folder** and **no content-based filtering** that could cause silent misdirection.
 
-### Roadmap
+### Virus scanning
 
-- Virus scanning is planned. It will follow the same principle: reject infected
-  mail with an informative SMTP error rather than silently quarantining it.
+Virus scanning is integrated (ClamAV via rspamd's antivirus module) and
+follows the same principle: infected mail is rejected at SMTP time with
+an informative error rather than silently quarantined. Oversized mail
+beyond the scanner's limits is delivered unscanned, never bounced (see
+the rspamd README «fail-open» notes).
