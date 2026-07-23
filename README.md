@@ -34,7 +34,10 @@ your correspondence to a third-party mail provider.
 - ClamAV antivirus (mail parts scanned by rspamd, virus hits rejected at SMTP time)
 - Incoming SPF check, DKIM signing and verification, DMARC support
 - Reliable delivery guarantee: deliver to INBOX, or reject with an informative error
+- Transport-encryption transparency: every mail is marked with how securely it arrived
 - Fully isolated local test stack — no mail ever leaves the machine
+
+The full, user-oriented feature list is in [FEATURES.md](FEATURES.md).
 
 ## Usage
 
@@ -49,9 +52,17 @@ in with your full email address and password.
 |----------|----------|------|
 | IMAP | SSL/TLS | 993 |
 | SMTP (submission) | StartTLS | 587 |
+| SMTP (submission) | SSL/TLS | 465 |
 | Sieve | StartTLS | 4190 |
 
-Without TLS the plain ports are IMAP `143`, SMTP `25`, POP3 `110`.
+Send your mail through the **submission** ports 587 (STARTTLS) or 465
+(implicit TLS) — never port 25. Both submission ports always require TLS
+and authentication, so your password and mail are never sent in the
+clear. Port 25 is the server-to-server MX port and does not accept
+client submission.
+
+Without TLS the plain ports are IMAP `143` and POP3 `110` (login still
+requires STARTTLS on them).
 
 Logging in always requires an encrypted connection: the server offers the
 cleartext password mechanisms only over TLS, so a mail client must use
@@ -123,6 +134,50 @@ Every own image in the stack is **headless**: a compiled `init` binary
 is the entrypoint; there is no shell, no busybox and no perl in any
 shipped image (pinned by `tests/image-contract.sh`).
 
+### Upgrading this stack — no mail is lost
+
+The upgrade path is designed so that **no accepted mail can be lost**,
+and every guarantee below is pinned by an automated test:
+
+1. **Build the new images, then restart:**
+
+   ```
+   docker compose build
+   docker compose down
+   docker compose up -d
+   ```
+
+   Never use `down -v` on a production stack — the `-v` flag deletes the
+   named volumes and with them queued mail, the account database, DKIM
+   keys and mailboxes.
+2. **Queued mail survives.** The Postfix queues live on named volumes
+   (`postfix-spool`, `mailforward-spool`); an accepted-but-undelivered
+   mail survives the container recreate and is delivered afterwards
+   (`tests/queue-persistence.sh` destroys the container mid-delivery and
+   proves the mail still arrives; `tests/compose-contract.sh` pins the
+   volume declarations).
+3. **Mail arriving during the downtime is not lost either:** while the
+   stack is down, sending servers get a connection failure, treat it as
+   temporary and retry — standard SMTP behaviour the sender's MTA owns.
+4. **Accounts and mailboxes survive.** The database lives on
+   `/var/lib/mysql` (pinned) and the mailbox store keeps its
+   `domain/localpart` layout across upgrades
+   (`tests/e2e/test_maildir_layout.py`).
+5. **A newer PostfixAdmin image on an existing database:** open
+   `/setup.php` once — the schema migrates in place, accounts untouched
+   (`tests/e2e/test_schema_upgrade.py`, see below).
+6. **After upgrading across the Dovecot 2.4 boundary** users may have to
+   re-set their password once (see the note in «Usage» — legacy weak
+   hashes are refused; mail is unaffected).
+7. **Coming from 2.x or 3.1** additionally follow the dedicated
+   sections: «Upgrading from 3.1» (database volume path) and «Upgrading
+   from v2.x» (opendkim/postgrey → rspamd; start with `DKIM_DMARC: log`
+   and escalate only after monitoring).
+
+New in 3.4.0, no action required: server-side OpenPGP in the webmail is
+now functional (it was silently broken in the headless image before);
+existing deployments simply gain the feature.
+
 ### Upgrading PostfixAdmin
 
 To upgrade PostfixAdmin by upgrading the image, you need to remove the `mailservice/postfixadmin` volume:
@@ -149,8 +204,11 @@ columns/tables (domain list, virtual list, fetchmail) fail with HTTP 500 while
 others (login, admin list) still work. The migration is **not** run on normal
 page access; trigger it once:
 
-- **Web:** open `/setup.php` (enter the setup password). `setup.php` includes
-  `upgrade.php`, which runs `_do_upgrade()` and applies the missing schema steps.
+- **Web:** open `/setup.php`. The page includes `upgrade.php`, which runs
+  `_do_upgrade()` and applies the missing schema steps already on page
+  load (the setup password guards the admin-management steps on that
+  page, not the migration). Pinned by `tests/e2e/test_schema_upgrade.py`
+  against a real 3.2-era schema.
 - **CLI (no web):** run the upgrade script directly in the container — it needs
   no setup password (only a valid DB config):
 
@@ -191,7 +249,89 @@ default and needs no configuration:
 
 Soften this **only deliberately** by setting `DOVECOT_ALLOW_CLEARTEXT=yes`
 (for example a trusted, isolated network that has no certificates). Doing so
-lets clients send passwords in cleartext and is not recommended.
+lets clients send passwords in cleartext and is not recommended. Both the
+secure default and the opt-in are pinned by the e2e suite (`test_tls.py`).
+
+### Ports and roles — MX vs. submission
+
+Postfix runs three SMTP listeners with different jobs and policies:
+
+| Port | Role | TLS | Auth | Restrictions |
+|------|------|-----|------|--------------|
+| 25  | MX (server-to-server) | opportunistic | anonymous | full MX + DNSBL |
+| 587 | submission (STARTTLS)  | required (≥1.2) | required | own users only |
+| 465 | submission (implicit TLS) | required (≥1.2) | required | own users only |
+
+- **Port 25** must, by RFC, accept anonymous mail from any server and
+  may not force TLS — so it uses **opportunistic** TLS: it encrypts
+  whenever the peer can, and accepts cleartext otherwise (a legitimate
+  mail is never bounced for lack of TLS; see the transport-transparency
+  section below to make cleartext hops visible).
+- **Ports 587 / 465** are for your own users' mail clients. They
+  **enforce** TLS 1.2+ and SASL authentication and drop the MX
+  restrictions, so an authenticated user is never blocked by a DNSBL or
+  greylist. Both require a certificate.
+
+**Opt-in — require TLS on the MX too:** set `SMTPD_TLS_REQUIRED=yes` on
+the `postfix` service to reject any port-25 connection that will not
+negotiate TLS 1.2+. This is deliberately **not** RFC-3207-compliant for
+a public MX (a peer without modern TLS can then no longer deliver) and
+is meant for internal, closed or B2B ingresses. It needs a certificate.
+
+### Transport-encryption transparency
+
+Opportunistic TLS on the MX means some senders still deliver in the
+clear or with obsolete TLS. To make that visible instead of silent:
+
+- Postfix records the receiving hop's TLS in its own `Received` header
+  (`(using TLSv1.3 with cipher …)`), and hands the TLS version/cipher to
+  rspamd.
+- rspamd stamps a machine-readable **`X-Transport-Security`** header on
+  every incoming mail: `TLSv1.3 (cipher …)` or `none`. Only the last hop
+  (sending server → our MX) is trustworthy — earlier `Received` headers
+  are written by foreign servers — but that is exactly the peer an
+  operator can act on. Adding a header never breaks a DKIM signature.
+- The webmail marks cleartext / obsolete transport (red / orange) so you
+  can see at a glance which correspondents to warn. To find offenders in
+  bulk, grep the delivered mail (or the postfix TLS logs) for
+  `X-Transport-Security: none`.
+
+### Mailbox quota (optional)
+
+Set `DOVECOT_QUOTA=yes` on the `dovecot` service to enforce a per-mailbox
+quota taken from the PostfixAdmin `mailbox.quota` column (bytes; `0` =
+unlimited, the default). A mailbox with no quota is unaffected. When a
+mailbox is full, delivery returns a **temporary** failure so the sending
+server retries — never a silent drop, in line with the
+reliability-over-filtering philosophy. Pinned by the `dovecot-quota` e2e
+service (`tests/e2e/test_quota.py`): an over-quota IMAP append is
+refused, an over-quota LMTP delivery gets a 4xx, and an unlimited mailbox
+is unaffected. Off by default (no behaviour change).
+
+### Sieve script size limit
+
+`SIEVE_MAX_SCRIPT_SIZE` (dovecot, default `500M`) caps a single Sieve
+script. The high default follows the project rule «artificial limits
+high, but configurable and documented»; lower it on a small box to
+shrink the authenticated ManageSieve upload/compile surface.
+
+### Upgrading from 3.1
+
+3.2.0 fixed the account-database volume path (it was mounted at
+`/usr/lib/mysql`, where MariaDB stores nothing — every recreate silently
+dropped all accounts). An existing 3.1 deployment therefore carries junk
+on the old path, and the fixed compose mounts the **same named volume**
+at `/var/lib/mysql`, where MariaDB now finds a non-empty, non-database
+directory and refuses to start. Remove the old volume once:
+
+    docker compose down
+    docker volume rm mailservice_postfixadmin-db
+    docker compose up -d
+
+There is **no data loss**: the volume never held the database (that was
+exactly the 3.1 bug). Accounts live in PostfixAdmin's database, which is
+recreated from `setup.php`; if you had a working 3.1 stack the data is in
+whatever storage MariaDB actually used, not in this volume.
 
 ### Antispam, antivirus, signing — one rspamd
 
@@ -804,12 +944,37 @@ stack.
 ### Tests
 
 ```bash
-npm test            # full end-to-end suite (Postfix, Dovecot, greylisting,
-                    # SPF/DKIM, PostfixAdmin and SnappyMail web UIs)
+npm test            # coverage guard + image/compose contracts + queue
+                    # persistence + full end-to-end suite (Postfix, Dovecot,
+                    # greylisting incl. the defer/retry path, SPF/DKIM/DMARC,
+                    # spam/virus rejection, all three SPAM_DELIVERY_MODEs,
+                    # aliases, quota, relay family, the PostfixAdmin schema
+                    # upgrade, webmail OpenPGP incl. passphrase-protected
+                    # keys, PostfixAdmin and SnappyMail web UIs)
 ```
+
+The complete register of all tests, grouped by kind and mapped to the
+numbered features, is in [TESTS.md](TESTS.md); a coverage guard keeps
+[FEATURES.md](FEATURES.md) and TESTS.md consistent.
 
 The suite runs in a fully isolated stack (domain `test.local`, its own DNS) so
 no mail ever leaves the machine.
+
+### Manual two-domain playground (realistic scenario)
+
+For hands-on, realistic testing there is a second manual environment in
+[tests/manual/](tests/manual/README.md): **two complete, independent
+mailservice deployments** (domains `alice` and `bob`) delivering mail to
+each other over real server-to-server SMTP, plus a local pseudo-CA
+issuing their TLS certificates. Its README walks through account setup,
+OpenPGP between the two users (plain / signed / signed+encrypted mail),
+spam and virus rejection with real bounces, aliases, Sieve filters and
+connecting a native mail client through the pseudo-CA.
+
+```bash
+npm run manual:up          # pseudo-CA + both full mail stacks
+npm run manual:down        # stop (data kept); manual:down:wipe = full reset
+```
 
 ### Manual testing in the isolated test stack
 
@@ -1002,10 +1167,11 @@ This guarantee holds as long as the sender's infrastructure also follows the RFC
 |-----------|----------------------|
 | Postfix restrictions (invalid HELO, unknown domain, relay attempt, RBL hit) | `5xx` permanent rejection — sender informed immediately |
 | Greylisting (rspamd, score-based) | `4xx` temporary deferral — RFC-compliant, sender retries automatically |
-| SPF hard fail (`-all`) | `550` permanent rejection — sender informed |
-| SPF soft-fail (`~all`), neutral, none | `DUNNO` — mail passes through to INBOX |
-| SPF / DNS temporary error | `4xx` deferral — sender retries |
-| DKIM verification failure | Header added, mail delivered — DKIM failure alone does not reject |
+| Spam score above `RSPAMD_REJECT_SCORE`, including a ClamAV virus hit | `550` permanent rejection at SMTP time — sender informed |
+| DKIM under `DKIM_DMARC` `permissive` / `reject` | broken or unknown-key signature → `550`; unsigned mail is accepted under `permissive`, rejected only under `reject` |
+| DMARC under `DKIM_DMARC` `permissive` / `reject` | sender publishes `p=reject` and the mail passes neither DKIM nor SPF alignment → `550` |
+| DKIM / DMARC under `DKIM_DMARC` `off` / `log` | never rejects — `log` stamps the verdict into `Authentication-Results`, `off` does nothing |
+| SPF | never rejects on its own (forwarding legitimately breaks SPF); the verdict is stamped into `Authentication-Results` and feeds DMARC alignment and the spam score |
 
 There is deliberately **no spam folder** and **no content-based filtering** that could cause silent misdirection.
 

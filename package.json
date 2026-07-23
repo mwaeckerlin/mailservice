@@ -1,6 +1,6 @@
 {
   "name": "@mwaeckerlin/mailservice",
-  "version": "3.2.0",
+  "version": "3.4.0",
   "scripts": {
     "build": "docker compose build",
     "start": "docker compose up --build --force-recreate --remove-orphans",
@@ -9,12 +9,19 @@
     "start:local": "docker compose -f docker-compose.yml -f docker-compose.local.yml up --build --force-recreate --remove-orphans",
     "start:local:daemon": "docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build --force-recreate --remove-orphans",
     "stop": "docker compose down",
-    "test": "npm run test:image && npm run test:compose && npm run test:e2e",
+    "test": "npm run test:coverage && npm run test:image && npm run test:compose && npm run test:queue && npm run test:e2e",
+    "test:coverage": "bash tests/coverage-guard.sh",
     "test:compose": "bash tests/compose-contract.sh",
+    "test:queue": "bash tests/queue-persistence.sh",
     "test:image": "docker compose -f docker-compose.yml -f docker-compose.local.yml build --quiet && bash tests/image-contract.sh mwaeckerlin/rspamd mwaeckerlin/redis mwaeckerlin/clamav mwaeckerlin/postfix mwaeckerlin/dovecot mwaeckerlin/smtp-relay mwaeckerlin/smtp-relay-tls mwaeckerlin/mailforward mwaeckerlin/postfixadmin mwaeckerlin/postfixadmin-proxy mwaeckerlin/snappymail:php-fpm mwaeckerlin/snappymail:nginx",
     "test:e2e": "bash tests/run-e2e.sh",
+    "test:e2e:stop": "docker compose -f tests/e2e/docker-compose.yml down -v --remove-orphans",
     "test:ui": "bash tests/run-ui.sh",
     "test:manual": "bash tests/run-manual.sh",
-    "test:manual:stop": "docker compose -f tests/e2e/docker-compose.yml -f tests/e2e/docker-compose.manual.yml down --remove-orphans"
+    "test:manual:stop": "docker compose -f tests/e2e/docker-compose.yml -f tests/e2e/docker-compose.manual.yml down --remove-orphans",
+    "manual:up": "docker compose -f tests/manual/letsencrypt/docker-compose.yml up -d && docker compose -f tests/manual/alice/docker-compose.yml up -d --build && docker compose -f tests/manual/bob/docker-compose.yml up -d --build",
+    "manual:down": "docker compose -f tests/manual/bob/docker-compose.yml down && docker compose -f tests/manual/alice/docker-compose.yml down && docker compose -f tests/manual/letsencrypt/docker-compose.yml down",
+    "manual:down:wipe": "docker compose -f tests/manual/bob/docker-compose.yml down -v && docker compose -f tests/manual/alice/docker-compose.yml down -v && docker compose -f tests/manual/letsencrypt/docker-compose.yml down -v",
+    "manual:config": "docker compose -f tests/manual/letsencrypt/docker-compose.yml config -q && docker compose -f tests/manual/alice/docker-compose.yml config -q && docker compose -f tests/manual/bob/docker-compose.yml config -q"
   }
 }

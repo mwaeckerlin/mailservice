@@ -1,8 +1,6 @@
-"""SPAM_DELIVERY_MODE end-to-end (v3.0.0).
+"""SPAM_DELIVERY_MODE end-to-end (all three modes).
 
-The e2e stack runs dovecot with the project default
-`SPAM_DELIVERY_MODE=reject`. This test suite verifies that under the
-default:
+Default mode (`reject`, main dovecot service):
 
   1. Clean mail lands in INBOX (sanity — the reject-mode delivery
      path does nothing surprising to normal mail).
@@ -10,20 +8,32 @@ default:
      SMTP time, so it never reached the delivery path — the exact
      mailservice project contract).
 
-`mark` and `folder` modes are covered by the mailservice `.claude/
-CLAUDE.md` design philosophy but are not the e2e default; the sieve
-generation logic for both modes is unit-tested by the dovecot
-submodule itself. Running the full e2e in either mode is a matter
-of overriding one env var in docker-compose (see the SPAM_DELIVERY_MODE
-comment in `docker-compose.yml`).
+Opt-in modes (dedicated `dovecot-mark` / `dovecot-folder` services,
+exercised over LMTP port 24 — the exact interface postfix uses for
+final delivery):
+
+  3. `mark` — mail carrying `X-Spam-Flag: YES` is delivered to INBOX
+     (headers only, never a Junk detour).
+  4. `folder` — mail carrying `X-Spam-Flag: YES` is routed to the
+     Junk folder by the server-side sieve_before rule; clean mail
+     still reaches INBOX.
+
+Ingress invariant (default stack, through rspamd):
+
+  5. Sender-supplied X-Spam-* verdict headers are forgeries of OUR
+     verdict and must not survive to delivery — otherwise a foreign
+     upstream filter's leftover verdict would silently misfile
+     legitimate mail under `folder`/`mark` mode (same invariant class
+     as the pinned X-Transport-Security forgery test in test_tls.py).
 """
+import email
 import imaplib
 import time
 import uuid
 
 from conftest import (
-    POSTFIX, DOVECOT, IMAP_P, ALICE, ALICE_PW, DOMAIN, smtp_send, send_raw,
-    imap_starttls,
+    POSTFIX, DOVECOT, DOVECOT_MARK, DOVECOT_FOLDER, IMAP_P, ALICE, ALICE_PW,
+    DOMAIN, smtp_send, send_raw, imap_starttls, lmtp_deliver, build_message,
 )
 
 
@@ -105,3 +115,121 @@ def test_gtube_reaches_neither_inbox_nor_junk(unique_subject):
                 f"SPAM_DELIVERY_MODE=reject. Reject-mode must produce "
                 f"zero deliveries."
             )
+
+
+# ------------------------------------------------- mark / folder modes ---
+
+def _spam_flagged_message(subject: str) -> bytes:
+    """A borderline-spam mail exactly as postfix hands it to dovecot:
+    rspamd accepted it at SMTP time (score below the reject threshold)
+    and stamped `X-Spam-Flag: YES` above the add-header threshold."""
+    msg = build_message(subject)
+    return (f"X-Spam-Flag: YES\r\n{msg}").encode()
+
+
+def _wait_in(host: str, folder: str, subject: str, retries: int = 15) -> bool:
+    for _ in range(retries):
+        with imap_starttls(host) as conn:
+            conn.login(ALICE, ALICE_PW)
+            if _search_in(conn, folder, subject):
+                return True
+        time.sleep(1)
+    return False
+
+
+def test_mark_mode_spam_flag_mail_lands_in_inbox(unique_subject):
+    """SPAM_DELIVERY_MODE=mark: a spam-flagged mail is delivered to
+    INBOX — the informational headers are the whole story, there is no
+    server-side Junk detour (the user's MUA filters client-side)."""
+    code, text = lmtp_deliver(DOVECOT_MARK, ALICE,
+                              _spam_flagged_message(unique_subject))
+    assert 200 <= code < 300, f"mark-mode LMTP delivery failed: {code} {text}"
+    assert _wait_in(DOVECOT_MARK, "INBOX", unique_subject), (
+        "spam-flagged mail did not reach INBOX under mark mode"
+    )
+    with imap_starttls(DOVECOT_MARK) as conn:
+        conn.login(ALICE, ALICE_PW)
+        assert not _search_in(conn, "Junk", unique_subject), (
+            "mark mode filed a mail into Junk — that is folder-mode "
+            "behaviour and a silent quarantine"
+        )
+
+
+def test_folder_mode_spam_flag_mail_lands_in_junk(unique_subject):
+    """SPAM_DELIVERY_MODE=folder: a spam-flagged mail is routed to the
+    Junk folder by the sieve_before rule (the documented, explicitly
+    not-recommended opt-in) — and consequently stays out of INBOX."""
+    code, text = lmtp_deliver(DOVECOT_FOLDER, ALICE,
+                              _spam_flagged_message(unique_subject))
+    assert 200 <= code < 300, f"folder-mode LMTP delivery failed: {code} {text}"
+    assert _wait_in(DOVECOT_FOLDER, "Junk", unique_subject), (
+        "spam-flagged mail did not reach Junk under folder mode"
+    )
+    with imap_starttls(DOVECOT_FOLDER) as conn:
+        conn.login(ALICE, ALICE_PW)
+        assert not _search_in(conn, "INBOX", unique_subject), (
+            "folder mode delivered a spam-flagged mail to INBOX as well"
+        )
+
+
+def test_folder_mode_clean_mail_lands_in_inbox(unique_subject):
+    """SPAM_DELIVERY_MODE=folder: mail without the flag is untouched by
+    the sieve rule and reaches INBOX normally."""
+    raw = build_message(unique_subject).encode()
+    code, text = lmtp_deliver(DOVECOT_FOLDER, ALICE, raw)
+    assert 200 <= code < 300, f"folder-mode LMTP delivery failed: {code} {text}"
+    assert _wait_in(DOVECOT_FOLDER, "INBOX", unique_subject), (
+        "clean mail did not reach INBOX under folder mode"
+    )
+    with imap_starttls(DOVECOT_FOLDER) as conn:
+        conn.login(ALICE, ALICE_PW)
+        assert not _search_in(conn, "Junk", unique_subject), (
+            "clean mail was filed into Junk under folder mode"
+        )
+
+
+# --------------------------------------------- forged-flag ingress guard ---
+
+def test_forged_spam_headers_stripped_on_ingress(unique_subject):
+    """The X-Spam-* verdict headers are OURS — sender-supplied copies are
+    forgeries and must be stripped by rspamd before delivery. Otherwise a
+    foreign upstream filter's leftover verdict on a clean, legitimate
+    mail would misfile it (Junk quarantine via `X-Spam-Flag` under folder
+    mode, MUA filters via Status/Level under mark mode) — exactly the
+    misdirection the design philosophy forbids.
+
+    This pins an UPSTREAM guarantee (rspamd milter_headers): incoming
+    X-Spam-Flag / X-Spam-Status are removed on every scan, X-Spam-Level
+    from score >= 1, and the `SPAM_FLAG` rule additionally scores a
+    pre-existing flag as a spam signal (5.0). Recognisable FORGED
+    markers are asserted absent (the same technique as
+    test_transport_security_header_not_forgeable) because rspamd may
+    legitimately stamp its OWN verdict headers on this mail. The flag
+    itself is deliberately NOT forged here: its `SPAM_FLAG` score plus
+    the e2e environment noise would push the mail over the add-header
+    threshold, and the test targets the dangerous below-threshold case
+    where only the ingress removal protects the delivery path."""
+    msg = build_message(unique_subject)
+    forged = (
+        "X-Spam-Status: Yes, score=999.9 (FORGED)\r\n"
+        "X-Spam-Level: ****FORGED****\r\n"
+        f"{msg}"
+    )
+    accepted, resp = send_raw(POSTFIX, f"outsider@{DOMAIN}", ALICE,
+                              forged.encode())
+    assert accepted, f"mail with forged X-Spam-* headers rejected: {resp!r}"
+    assert _wait_in(DOVECOT, "INBOX", unique_subject), (
+        "mail with forged X-Spam-* headers never delivered"
+    )
+    with imap_starttls() as conn:
+        conn.login(ALICE, ALICE_PW)
+        conn.select("INBOX")
+        _, data = conn.search(None, f'SUBJECT "{unique_subject}"')
+        _, raw = conn.fetch(data[0].split()[0], "(RFC822)")
+        delivered = email.message_from_bytes(raw[0][1])
+    for header in ("X-Spam-Status", "X-Spam-Level", "X-Spam-Flag"):
+        values = delivered.get_all(header, [])
+        assert "FORGED" not in " ".join(values), (
+            f"forged {header} survived to delivery: {values!r} — a foreign "
+            f"verdict on clean mail misfiles it under folder/mark mode"
+        )

@@ -21,7 +21,10 @@ services:
     image: alpine:3.23
     entrypoint: ["/bin/sh", "-c"]
     command:
-      - "apk add --no-cache openssl >/dev/null 2>&1 && mkdir -p /etc/letsencrypt/live/test.local && openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -keyout /etc/letsencrypt/live/test.local/privkey.pem -out /etc/letsencrypt/live/test.local/fullchain.pem -subj '/CN=mail.test.local' -addext 'subjectAltName=DNS:mail.test.local,DNS:test.local,DNS:postfix,DNS:postfix-strict,DNS:postfix-log,DNS:dovecot' && chmod 644 /etc/letsencrypt/live/test.local/*"
+      # apk pulls openssl over the network — retry so a transient
+      # mirror hiccup never aborts the whole e2e run (the cert step
+      # itself is offline and deterministic).
+      - "i=0; while ! apk add --no-cache openssl >/dev/null 2>&1; do i=$$((i+1)); [ $$i -ge 15 ] && echo 'apk add openssl failed after 15 tries' && exit 1; sleep 3; done; mkdir -p /etc/letsencrypt/live/test.local && openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -keyout /etc/letsencrypt/live/test.local/privkey.pem -out /etc/letsencrypt/live/test.local/fullchain.pem -subj '/CN=mail.test.local' -addext 'subjectAltName=DNS:mail.test.local,DNS:test.local,DNS:postfix,DNS:postfix-strict,DNS:postfix-log,DNS:postfix-tlsreq,DNS:dovecot,DNS:dovecot-quota,DNS:dovecot-mark,DNS:dovecot-folder' && chmod 644 /etc/letsencrypt/live/test.local/*"
     volumes:
       - letsencrypt:/etc/letsencrypt
 
@@ -80,7 +83,6 @@ services:
       DOMAINS:                   "test.local other.local"
       AUTHSERV_ID:               "mail.test.local"
       DKIM_DMARC:                "permissive"
-      NAMESERVERS:               "10.100.0.2"
       REDIS_HOST:                "redis"
       CLAMAV_HOST:               "clamav"
       RSPAMD_REJECT_SCORE:       "15"
@@ -123,7 +125,6 @@ services:
       DOMAINS:               "test.local other.local"
       AUTHSERV_ID:           "mail.test.local"
       DKIM_DMARC:            "reject"
-      NAMESERVERS:           "10.100.0.2"
       REDIS_HOST:            "redis"
       CLAMAV_HOST:           "clamav"
       RSPAMD_REJECT_SCORE:   "15"
@@ -153,7 +154,6 @@ services:
       DOMAINS:               "test.local other.local"
       AUTHSERV_ID:           "mail.test.local"
       DKIM_DMARC:            "log"
-      NAMESERVERS:           "10.100.0.2"
       REDIS_HOST:            "redis"
       CLAMAV_HOST:           "clamav"
       RSPAMD_REJECT_SCORE:   "15"
@@ -274,6 +274,34 @@ services:
       dovecot:         { condition: service_started }
     networks: [mail, db-net]
 
+  # SMTPD_TLS_REQUIRED=yes: the MX (port 25) must reject any connection
+  # that will not negotiate TLS. Has a certificate (so TLS is possible);
+  # pins the opt-in reject mode. See test_tls.py::test_tls_required_*.
+  postfix-tlsreq:
+    build: ../../postfix
+    hostname: postfix-tlsreq.test.local
+    environment:
+      RSPAMD:              rspamd
+      DOMAIN:              test.local
+      HOSTNAME:            mail.test.local
+      HOSTROOT:            test.local
+      DB_HOST:             postfixadmin-db
+      DB_USER:             postfixadmin
+      DB_PASSWORD:         testpass
+      DB_NAME:             postfixadmin
+      DISABLE_DNSBL:       "yes"
+      MYNETWORKS:          "127.0.0.0/8"
+      SMTPD_TLS_REQUIRED:  "yes"
+    dns: ["10.100.0.2"]
+    volumes:
+      - letsencrypt:/etc/letsencrypt:ro
+    depends_on:
+      postfixadmin-db: { condition: service_healthy }
+      rspamd:          { condition: service_healthy }
+      dns:             { condition: service_healthy }
+      certs-init:      { condition: service_completed_successfully }
+    networks: [mail, antispam, db-net, dns-net]
+
   dovecot:
     build: ../../dovecot
     environment:
@@ -289,6 +317,103 @@ services:
       # PostfixAdmin's php_crypt ($6$…) hashes stored in the shared database
     volumes:
       - maildata:/var/mail/domains
+      - letsencrypt:/etc/letsencrypt:ro
+    depends_on:
+      postfixadmin-db: { condition: service_healthy }
+      rspamd:          { condition: service_healthy }
+      certs-init:      { condition: service_completed_successfully }
+    networks: [mail, antispam, db-net]
+
+  # DOVECOT_QUOTA=yes: per-mailbox quota from the PostfixAdmin
+  # mailbox.quota column (sql userdb). Own maildata so quota accounting
+  # is isolated from the main dovecot. Pins that (a) the sql userdb
+  # authenticates, (b) enforcement blocks an over-quota IMAP append and
+  # (c) an over-quota LMTP delivery tempfails (the production path).
+  # See test_quota.py.
+  dovecot-quota:
+    build: ../../dovecot
+    environment:
+      DB_HOST:              postfixadmin-db
+      DB_USER:              postfixadmin
+      DB_PASSWORD:          testpass
+      DB_NAME:              postfixadmin
+      DOMAIN:               test.local
+      DOVECOT_QUOTA:        "yes"
+      DOVECOT_DEBUG_AUTH:   "yes"
+    volumes:
+      - maildata-quota:/var/mail/domains
+      - letsencrypt:/etc/letsencrypt:ro
+    depends_on:
+      postfixadmin-db: { condition: service_healthy }
+      rspamd:          { condition: service_healthy }
+      certs-init:      { condition: service_completed_successfully }
+    networks: [mail, antispam, db-net]
+
+  # SPAM_DELIVERY_MODE=mark: borderline spam (X-Spam-Flag: YES, accepted
+  # at SMTP time) is delivered to INBOX with the informational headers —
+  # never to Junk, never a rewritten subject. Own maildata so folder
+  # assertions are isolated. SIEVE_MAX_SCRIPT_SIZE is lowered to a
+  # testable value here to pin the knob's EFFECTIVENESS (an oversized
+  # ManageSieve upload must be refused), not just its validation.
+  # See test_delivery_mode.py / test_sieve.py.
+  dovecot-mark:
+    build: ../../dovecot
+    environment:
+      DB_HOST:                postfixadmin-db
+      DB_USER:                postfixadmin
+      DB_PASSWORD:            testpass
+      DB_NAME:                postfixadmin
+      DOMAIN:                 test.local
+      SPAM_DELIVERY_MODE:     mark
+      SIEVE_MAX_SCRIPT_SIZE:  1k
+      DOVECOT_DEBUG_AUTH:     "yes"
+    volumes:
+      - maildata-mark:/var/mail/domains
+      - letsencrypt:/etc/letsencrypt:ro
+    depends_on:
+      postfixadmin-db: { condition: service_healthy }
+      rspamd:          { condition: service_healthy }
+      certs-init:      { condition: service_completed_successfully }
+    networks: [mail, antispam, db-net]
+
+  # DOVECOT_ALLOW_CLEARTEXT=yes on a CERTLESS stack: the documented
+  # deliberate softening for trusted, isolated networks without
+  # certificates — cleartext IMAP/POP3 logins must then work (the
+  # default `no` on the certless path means «no usable login at all»,
+  # pinned on the main dovecot). No letsencrypt volume on purpose.
+  # See test_tls.py::test_cleartext_optin_*.
+  dovecot-cleartext:
+    build: ../../dovecot
+    environment:
+      DB_HOST:                  postfixadmin-db
+      DB_USER:                  postfixadmin
+      DB_PASSWORD:              testpass
+      DB_NAME:                  postfixadmin
+      DOMAIN:                   test.local
+      DOVECOT_ALLOW_CLEARTEXT:  "yes"
+      DOVECOT_DEBUG_AUTH:       "yes"
+    volumes:
+      - maildata-cleartext:/var/mail/domains
+    depends_on:
+      postfixadmin-db: { condition: service_healthy }
+    networks: [mail, db-net]
+
+  # SPAM_DELIVERY_MODE=folder: mail carrying X-Spam-Flag: YES is routed
+  # to the recipient's Junk folder by the server-side sieve_before rule
+  # (silent quarantine — the documented, not-recommended opt-in). Own
+  # maildata so folder assertions are isolated. See test_delivery_mode.py.
+  dovecot-folder:
+    build: ../../dovecot
+    environment:
+      DB_HOST:              postfixadmin-db
+      DB_USER:              postfixadmin
+      DB_PASSWORD:          testpass
+      DB_NAME:              postfixadmin
+      DOMAIN:               test.local
+      SPAM_DELIVERY_MODE:   folder
+      DOVECOT_DEBUG_AUTH:   "yes"
+    volumes:
+      - maildata-folder:/var/mail/domains
       - letsencrypt:/etc/letsencrypt:ro
     depends_on:
       postfixadmin-db: { condition: service_healthy }
@@ -322,7 +447,19 @@ services:
 
   smtp-relay:
     build: ../../smtp-relay
-    networks: [mail]
+    environment:
+      # the isolated e2e resolver cannot answer the RBL zones — every
+      # lookup would stall the SMTP dialogue until the resolver timeout
+      DISABLE_DNSBL: "yes"
+    # the isolated resolver lets the relay do a REAL MX lookup for
+    # extern.local and deliver to fake-smtp — pinning the image's core
+    # purpose (accept + relay), not just banner/EHLO. See
+    # test_relay_family.py::test_smtp_relay_relays_to_external_mx.
+    dns: ["10.100.0.2"]
+    depends_on:
+      dns:       { condition: service_healthy }
+      fake-smtp: { condition: service_started }
+    networks: [mail, dns-net]
 
   smtp-relay-tls:
     build: ../../smtp-relay-tls
@@ -390,11 +527,66 @@ services:
     depends_on: [postfixadmin]
     networks: [ui-net]
 
+  # ── Schema-upgrade e2e (README «Database schema upgrade after an
+  # image update») — a REAL old schema (PostfixAdmin 3.2.4, generated by
+  # the old release's own upgrade chain, never a hand-written fixture)
+  # in a dedicated database; the CURRENT image runs on top of it and the
+  # documented trigger (setup.php) must migrate the schema.
+  # See test_schema_upgrade.py.
+  postfixadmin-db-upgrade:
+    image: mariadb:11
+    environment:
+      MYSQL_DATABASE:             postfixadmin
+      MYSQL_USER:                 postfixadmin
+      MYSQL_PASSWORD:             testpass
+      MYSQL_RANDOM_ROOT_PASSWORD: "yes"
+    healthcheck:
+      test: ["CMD", "mariadb-admin", "ping", "-h", "localhost", "-u", "postfixadmin", "-ptestpass"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks: [ui-net]
+
+  postfixadmin-old-init:
+    build: ./postfixadmin-old
+    depends_on:
+      postfixadmin-db-upgrade: { condition: service_healthy }
+    networks: [ui-net]
+
+  postfixadmin-upgrade:
+    build: ../../postfixadmin
+    environment:
+      DATABASE_TYPE:          mysqli
+      DATABASE_HOST:          postfixadmin-db-upgrade
+      DATABASE_NAME:          postfixadmin
+      DATABASE_USER:          postfixadmin
+      DATABASE_PASSWORD:      testpass
+      SETUP_PASSWORD:              "$$2y$$12$$MHkqblkyo7WD0q6D3I7y9epJiZO9MqyN4AIYxmtn1NuyikRIvpDUy"
+      EMAILCHECK_RESOLVE_DOMAIN:   "NO"
+    depends_on:
+      postfixadmin-old-init: { condition: service_completed_successfully }
+    networks: [ui-net]
+
+  postfixadmin-upgrade-proxy:
+    build: ../../postfixadmin-proxy
+    environment:
+      PHP_FPM_HOST: postfixadmin-upgrade
+    depends_on: [postfixadmin-upgrade]
+    networks: [ui-net]
+
   snappymail-init:
-    image: mwaeckerlin/very-base
+    # very-base + the bundled transport-security plugin + install script
+    build:
+      context: ../../rainloop
+      dockerfile: Dockerfile.plugin-init
     entrypoint: ["/bin/sh", "-c"]
+    environment:
+      SNAPPYMAIL_DATA: /data
     command:
-      - "mkdir -p /data/_data_/_default_/configs && printf '[security]\\nadmin_password = \"$$2y$$12$$wbso8NPeetgyrrwa5yKLBup0N011YwzKfyOYb0TCtsv/jX2q58nJi\"\\nadmin_login = \"admin\"\\n' > /data/_data_/_default_/configs/application.ini && chown -R 100 /data"
+      # [security] openpgp = On makes the OpenPGP settings pane and the
+      # compose sign/encrypt controls available — exercised by
+      # test_openpgp.py against the shipped php-gnupg backend.
+      - "mkdir -p /data/_data_/_default_/configs && printf '[security]\\nadmin_password = \"$$2y$$12$$wbso8NPeetgyrrwa5yKLBup0N011YwzKfyOYb0TCtsv/jX2q58nJi\"\\nadmin_login = \"admin\"\\nopenpgp = On\\n' > /data/_data_/_default_/configs/application.ini && /usr/local/bin/install-plugins.sh"
     volumes:
       - snappymail-data:/data
     networks: []
@@ -436,7 +628,11 @@ services:
       postfix-log:        { condition: service_started }
       postfix-nocert:     { condition: service_started }
       dovecot:            { condition: service_started }
+      dovecot-mark:       { condition: service_started }
+      dovecot-folder:     { condition: service_started }
+      dovecot-cleartext:  { condition: service_started }
       postfixadmin-proxy: { condition: service_started }
+      postfixadmin-upgrade-proxy: { condition: service_started }
       snappymail-proxy:   { condition: service_started }
       smtp-relay:         { condition: service_started }
       smtp-relay-tls:     { condition: service_started }
@@ -447,6 +643,9 @@ services:
       POSTFIX_LOG_HOST:    postfix-log
       POSTFIX_NOCERT_HOST: postfix-nocert
       DOVECOT_HOST:        dovecot
+      DOVECOT_MARK_HOST:   dovecot-mark
+      DOVECOT_FOLDER_HOST: dovecot-folder
+      DOVECOT_CLEARTEXT_HOST: dovecot-cleartext
       RSPAMD_HOST:         rspamd
       RSPAMD_STRICT_HOST:  rspamd-strict
       RSPAMD_LOG_HOST:     rspamd-log
@@ -462,6 +661,8 @@ services:
       BOB_USER:           bob@test.local
       BOB_PASS:           bobpass12
       POSTFIXADMIN_URL:   "http://postfixadmin-proxy:8080"
+      POSTFIXADMIN_UPGRADE_URL: "http://postfixadmin-upgrade-proxy:8080"
+      PA_UPGRADE_DB_HOST: postfixadmin-db-upgrade
       SNAPPYMAIL_URL:     "http://snappymail-proxy:8080"
       ADMIN_USER:         admin@test.local
       ADMIN_PASS:         Admin123pass
@@ -508,4 +709,8 @@ volumes:
     external: true
   snappymail-data:
   maildata:
+  maildata-quota:
+  maildata-mark:
+  maildata-folder:
+  maildata-cleartext:
   letsencrypt:

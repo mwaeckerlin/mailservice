@@ -210,12 +210,9 @@ services:
     image: mwaeckerlin/postfix
     build: postfix
     ports:
-      - "25:25"
-      # Trade-off: submission (587) currently maps onto the same smtpd
-      # as the MX port — auth is TLS-only either way, but a dedicated
-      # submission service (auth mandatory, TLS enforced, no MX
-      # restrictions) would separate the two roles cleanly. See README.
-      - "587:25"
+      - "25:25"            # MX (server-to-server), opportunistic TLS
+      - "587:587"          # STARTTLS submission — TLS + SASL enforced
+      - "465:465"          # implicit-TLS submission (smtps)
     environment:
       RSPAMD: rspamd               # host or host:port, default port 11332
       HOSTNAME: merkur.mrw.sh

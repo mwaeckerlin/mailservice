@@ -19,11 +19,15 @@ Contracts pinned here:
      postfix; postfix owns delivery — a tempfail would surface a 451
      in the webmail and the mail would never reach the queue. Pinned
      by rspamd/greylist.conf `check_authed = false`.
-
-The delay/retry mechanics of the greylist action itself (4xx then
-accept) only ever apply to mid-score mail; no deterministic payload
-exists for that score band (GTUBE forces reject, clean mail scores
-~0), so that path is covered by rspamd upstream, not e2e.
+  3. The greylist action itself: mail in the doubtful score band
+     (greylist threshold 5 <= score < reject 15) is tempfailed with a
+     4xx on the first attempt and ACCEPTED on the retry of the same
+     message — the RFC-compliant defer/retry dance. The deterministic
+     mid-score payload combines rules that fire reliably in this
+     stack: a pre-existing spam flag (`SPAM_FLAG`, 5.0 — rspamd
+     scores forged verdict headers), the e2e HELO heuristics
+     (`HFILTER_HELO_5`, 3.0) and a missing Date header
+     (`MISSING_DATE`, 1.0) — ~9 points, comfortably inside the band.
 """
 import imaplib
 import smtplib
@@ -32,7 +36,7 @@ import time
 
 from conftest import (
     POSTFIX, SMTP_P, DOVECOT, IMAP_P, ALICE, ALICE_PW, BOB, DOMAIN,
-    build_message, imap_starttls,
+    GREYLIST_RETRY_DELAY, build_message, imap_starttls,
 )
 
 
@@ -72,6 +76,47 @@ def test_clean_unknown_sender_not_greylisted(unique_subject):
     assert _wait_for_mail(subject), (
         "Clean first-attempt mail was accepted at SMTP time but never "
         "arrived in INBOX"
+    )
+
+
+def test_midscore_mail_greylisted_then_accepted(unique_subject):
+    """The greylist defer/retry path end-to-end: a mid-score mail from a
+    fresh triplet draws a 4xx on the first attempt; retrying the SAME
+    message after the greylist timeout (e2e: RSPAMD_GREYLIST_TIMEOUT=5s)
+    is accepted and the mail is delivered to INBOX — tempfail is a
+    deferral, never a loss."""
+    sender = f"grey-mid-{unique_subject.lower()}@{DOMAIN}"
+    subject = f"grey-mid-{unique_subject}"
+    # deterministic mid-score payload (~9 points, see module docstring):
+    # forged spam flag + e2e HELO heuristics + missing Date header
+    raw = (f"X-Spam-Flag: YES\r\n"
+           + build_message(subject, from_=sender)).encode()
+
+    def _attempt() -> int:
+        try:
+            with smtplib.SMTP(POSTFIX, SMTP_P, timeout=15) as s:
+                s.ehlo(f"testhost.{DOMAIN}")
+                s.mail(sender)
+                s.rcpt(ALICE)
+                code, _ = s.data(raw)
+                return code
+        except smtplib.SMTPResponseException as e:
+            return e.smtp_code
+
+    first = _attempt()
+    assert 400 <= first < 500, (
+        f"mid-score mail was not greylisted on the first attempt "
+        f"(got {first}) — the defer path of the greylist action is dead"
+    )
+
+    time.sleep(GREYLIST_RETRY_DELAY)
+    second = _attempt()
+    assert 200 <= second < 300, (
+        f"greylisted mail was not accepted on the retry (got {second}) — "
+        f"a greylist tempfail must be a deferral, not a permanent loss"
+    )
+    assert _wait_for_mail(subject), (
+        "greylisted-then-accepted mail never arrived in INBOX"
     )
 
 

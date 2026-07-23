@@ -1,0 +1,74 @@
+# Pseudo-CA for the manual two-domain environment (tests/manual).
+#
+# Generates a throw-away local CA plus one server certificate per mail
+# domain (alice, bob) in the /etc/letsencrypt/live/<domain>/ layout the
+# postfix and dovecot images expect, into the shared named volume
+# `manual-letsencrypt` that both mail stacks mount read-only. A tiny
+# web server publishes the CA certificate (and the public parts) so it
+# can be imported into a browser or mail client on the host:
+#
+#   http://letsencrypt:8082/ca.crt        (with the /etc/hosts entry)
+#
+# This compose also OWNS the shared docker network `manual-mailnet` and
+# the shared certificate volume — start it first, stop it last (see
+# tests/manual/README.md). Foreign images (alpine, nginx) are fine
+# here: this is test infrastructure, not a shipped artefact.
+
+services:
+
+  ca-init:
+    image: alpine:3.23
+    entrypoint: ["/bin/sh", "-c"]
+    # idempotent: existing CA / certs are kept, so restarting the stack
+    # never invalidates a CA already imported into a mail client
+    command:
+      - "i=0; while ! apk add --no-cache openssl >/dev/null 2>&1; do i=$$((i+1)); [ $$i -ge 15 ] && echo 'apk add openssl failed' && exit 1; sleep 3; done;
+         set -e;
+         cd /etc/letsencrypt;
+         mkdir -p live/alice live/bob;
+         test -f ca.key || openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -keyout ca.key -out ca.crt -subj '/CN=Mailservice Manual Test CA';
+         if ! test -f live/alice/privkey.pem; then
+           openssl req -newkey rsa:2048 -nodes -keyout live/alice/privkey.pem -out /tmp/alice.csr -subj '/CN=alice';
+           echo 'subjectAltName=DNS:alice' > /tmp/alice.ext;
+           openssl x509 -req -in /tmp/alice.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 3650 -extfile /tmp/alice.ext -out /tmp/alice.crt;
+           cat /tmp/alice.crt ca.crt > live/alice/fullchain.pem;
+         fi;
+         if ! test -f live/bob/privkey.pem; then
+           openssl req -newkey rsa:2048 -nodes -keyout live/bob/privkey.pem -out /tmp/bob.csr -subj '/CN=bob';
+           echo 'subjectAltName=DNS:bob' > /tmp/bob.ext;
+           openssl x509 -req -in /tmp/bob.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 3650 -extfile /tmp/bob.ext -out /tmp/bob.crt;
+           cat /tmp/bob.crt ca.crt > live/bob/fullchain.pem;
+         fi;
+         chmod -R a+rX live; chmod 644 live/alice/privkey.pem live/bob/privkey.pem ca.crt;
+         echo '**** pseudo-CA ready: live/alice live/bob + ca.crt'"
+    volumes:
+      - letsencrypt:/etc/letsencrypt
+
+  # serves ca.crt (and the public cert parts) for import into browsers
+  # and mail clients on the host; the private keys stay out of reach
+  letsencrypt:
+    image: nginx:alpine
+    depends_on:
+      ca-init: { condition: service_completed_successfully }
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - "mkdir -p /usr/share/nginx/html;
+         cp /etc/letsencrypt/ca.crt /usr/share/nginx/html/ca.crt;
+         cp /etc/letsencrypt/live/alice/fullchain.pem /usr/share/nginx/html/alice-fullchain.pem;
+         cp /etc/letsencrypt/live/bob/fullchain.pem /usr/share/nginx/html/bob-fullchain.pem;
+         exec nginx -g 'daemon off;'"
+    volumes:
+      - letsencrypt:/etc/letsencrypt:ro
+    ports:
+      - "127.0.0.1:8082:80"
+    networks:
+      mailnet:
+        aliases: [letsencrypt]
+
+networks:
+  mailnet:
+    name: manual-mailnet
+
+volumes:
+  letsencrypt:
+    name: manual-letsencrypt

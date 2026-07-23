@@ -5,12 +5,15 @@ Tests:
 - Upload, list, activate, delete scripts
 - Filter mails into a custom folder by Subject header
 - Multiple rules in one script
+- SIEVE_MAX_SCRIPT_SIZE is EFFECTIVE (against dovecot-mark, which runs
+  with a testable 1k limit) — an oversized upload is refused, a small
+  one still accepted; the knob is enforced, not just validated
 """
 import imaplib
 import time
 import pytest
 from conftest import (
-    DOVECOT, SIEVE_P, IMAP_P,
+    DOVECOT, DOVECOT_MARK, SIEVE_P, IMAP_P,
     ALICE, ALICE_PW,
     smtp_send, imap_starttls,
 )
@@ -154,6 +157,29 @@ def test_sieve_non_matching_mail_to_inbox(unique_subject):
 
     assert _imap_search(subject, "INBOX"), \
         "Non-matching mail did not arrive in INBOX"
+
+
+def test_sieve_max_script_size_enforced():
+    """The dovecot-mark service runs with SIEVE_MAX_SCRIPT_SIZE=1k: an
+    oversized script upload must be refused (the limit is enforced, not
+    merely rendered into the config), while a small script on the same
+    service still passes — proving the refusal is the size limit, not a
+    broken sieve setup."""
+    oversized = "# padding\n" * 400 + SIEVE_FILEINTO   # ~4 KB > 1k limit
+    # separate connections: dovecot may drop the session after an
+    # oversized literal instead of answering NO — both count as refusal
+    with ManageSieveClient(DOVECOT_MARK, SIEVE_P) as ms:
+        ms.authenticate(ALICE, ALICE_PW)
+        with pytest.raises(ManageSieveError):
+            ms.put_script(SCRIPT_NAME, oversized)
+    with ManageSieveClient(DOVECOT_MARK, SIEVE_P) as ms:
+        ms.authenticate(ALICE, ALICE_PW)
+        assert SCRIPT_NAME not in ms.list_scripts(), (
+            "oversized script was stored despite the size limit"
+        )
+        ms.put_script(SCRIPT_NAME, SIEVE_FILEINTO)
+        assert SCRIPT_NAME in ms.list_scripts()
+        ms.delete_script(SCRIPT_NAME)
 
 
 def test_sieve_multiple_rules(unique_subject):

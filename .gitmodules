@@ -7,9 +7,6 @@
 [submodule "smtp-relay-tls"]
 	path = smtp-relay-tls
 	url = git@github.com:mwaeckerlin/smtp-relay-tls.git
-[submodule "postgrey"]
-	path = postgrey
-	url = git@github.com:mwaeckerlin/postgrey.git
 [submodule "dovecot"]
 	path = dovecot
 	url = git@github.com:mwaeckerlin/dovecot.git

@@ -1,0 +1,76 @@
+# Queue-persistence test stack (F4/F15 — «accepted mail is never lost»).
+#
+# mailforward accepts a mail for a mapped alias whose target MX
+# (fake-smtp) is DOWN — the mail is fsync'ed into the queue on the named
+# `queue-spool` volume and delivery defers. The test script then
+# DESTROYS the mailforward container (docker compose rm -sf), recreates
+# it, brings the target MX up and proves the queued mail is delivered —
+# the exact guarantee an operator relies on during a migration or image
+# update. See tests/queue-persistence.sh for the choreography.
+#
+# TEST compose: builds the project-own images via `../..` (inside the
+# project boundary); alpine/fake-smtp are test helpers.
+
+services:
+
+  dns:
+    build: ./dns
+    networks:
+      queue-net:
+        ipv4_address: 10.101.0.2
+    healthcheck:
+      test: ["CMD-SHELL", "nc -w1 127.0.0.1 53 </dev/null"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+      start_period: 3s
+
+  mailforward:
+    build: ../../mailforward
+    environment:
+      MAILHOST: fwd.local
+      MAPPINGS: "forward@fwd.local sink@extern.local"
+      # the isolated resolver cannot answer RBL zones
+      DISABLE_DNSBL: "yes"
+    dns: ["10.101.0.2"]
+    ports:
+      - "127.0.0.1:47925:25"
+    volumes:
+      # THE contract under test: /var/spool/postfix on a NAMED volume —
+      # the queue must survive the container recreate
+      - queue-spool:/var/spool/postfix
+    depends_on:
+      dns: { condition: service_healthy }
+    networks:
+      - queue-net
+
+  # target MX of extern.local — deliberately NOT started by default;
+  # the test script brings it up only after the recreate
+  fake-smtp:
+    image: mwaeckerlin/fake-smtp
+    volumes:
+      - fake-mails:/mails
+    networks:
+      queue-net:
+        ipv4_address: 10.101.0.99
+
+  # one-shot helper: greps the fake-smtp mail store for $SUBJECT
+  verify:
+    image: alpine:3.23
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["grep -r \"$$SUBJECT\" /mails"]
+    environment:
+      SUBJECT: ""
+    volumes:
+      - fake-mails:/mails:ro
+    networks: []
+
+networks:
+  queue-net:
+    ipam:
+      config:
+        - subnet: 10.101.0.0/24
+
+volumes:
+  queue-spool:
+  fake-mails:

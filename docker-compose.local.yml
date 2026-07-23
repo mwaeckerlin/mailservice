@@ -41,6 +41,21 @@ services:
   # Webmailer — rainloop is a mailservice submodule (subdirectory), so
   # this is an own-image build with no `../` context. SKIP_GPG_VERIFY=1
   # because the repo ships only a placeholder release-signing key.
+  # Installs the bundled transport-security plugin into the SnappyMail
+  # data volume and enables it (the php-fpm image is headless, and
+  # plugins live in the data volume). Idempotent; runs before snappymail.
+  snappymail-plugin-init:
+    image: mwaeckerlin/snappymail:plugin-init
+    build:
+      context: rainloop
+      dockerfile: Dockerfile.plugin-init
+    environment:
+      SNAPPYMAIL_DATA: /app/data
+    volumes:
+      - snappymail-data:/app/data
+    networks:
+      - snappymail-net
+
   snappymail:
     image: mwaeckerlin/snappymail:php-fpm
     build:
@@ -49,6 +64,9 @@ services:
       target: php-fpm
       args:
         SKIP_GPG_VERIFY: "1"
+    depends_on:
+      snappymail-plugin-init:
+        condition: service_completed_successfully
     volumes:
       # /app/data is the declared data volume of the php-fpm image —
       # any other path silently loses configuration and accounts

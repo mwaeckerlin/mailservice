@@ -23,10 +23,12 @@ def insecure_tls_ctx() -> ssl.SSLContext:
     return ctx
 
 
-def imap_starttls():
+def imap_starttls(host: str | None = None):
     """A connected IMAP4 with STARTTLS already negotiated — ready for
-    .login(). Use instead of imaplib.IMAP4(...) everywhere auth follows."""
-    conn = imaplib.IMAP4(DOVECOT, IMAP_P)
+    .login(). Use instead of imaplib.IMAP4(...) everywhere auth follows.
+    Defaults to the main dovecot; pass a host for the mode-specific
+    services (dovecot-quota, dovecot-mark, dovecot-folder)."""
+    conn = imaplib.IMAP4(host or DOVECOT, IMAP_P)
     conn.starttls(ssl_context=insecure_tls_ctx())
     return conn
 
@@ -44,11 +46,18 @@ POSTFIX        = os.environ.get("POSTFIX_HOST",         "postfix")
 POSTFIX_STRICT = os.environ.get("POSTFIX_STRICT_HOST",  "postfix-strict")
 POSTFIX_LOG    = os.environ.get("POSTFIX_LOG_HOST",     "postfix-log")
 POSTFIX_NOCERT = os.environ.get("POSTFIX_NOCERT_HOST",  "postfix-nocert")
+POSTFIX_TLSREQ = os.environ.get("POSTFIX_TLSREQ_HOST",  "postfix-tlsreq")
 DOVECOT        = os.environ.get("DOVECOT_HOST",         "dovecot")
+DOVECOT_QUOTA  = os.environ.get("DOVECOT_QUOTA_HOST",   "dovecot-quota")
+DOVECOT_MARK   = os.environ.get("DOVECOT_MARK_HOST",    "dovecot-mark")
+DOVECOT_FOLDER = os.environ.get("DOVECOT_FOLDER_HOST",  "dovecot-folder")
+DOVECOT_CLEAR  = os.environ.get("DOVECOT_CLEARTEXT_HOST", "dovecot-cleartext")
 RSPAMD         = os.environ.get("RSPAMD_HOST",          "rspamd")
 RSPAMD_STRICT  = os.environ.get("RSPAMD_STRICT_HOST",   "rspamd-strict")
 RSPAMD_LOG     = os.environ.get("RSPAMD_LOG_HOST",      "rspamd-log")
 SMTP_P    = int(os.environ.get("SMTP_PORT",     "25"))
+SUBM_P    = int(os.environ.get("SUBMISSION_PORT", "587"))
+SMTPS_P   = int(os.environ.get("SMTPS_PORT",    "465"))
 IMAP_P    = int(os.environ.get("IMAP_PORT",    "143"))
 POP3_P    = int(os.environ.get("POP3_PORT",    "110"))
 SIEVE_P   = int(os.environ.get("SIEVE_PORT", "4190"))
@@ -59,6 +68,10 @@ ALICE     = os.environ.get("ALICE_USER",    f"alice@{DOMAIN}")
 ALICE_PW  = os.environ.get("ALICE_PASS",    "alicepass12")
 BOB       = os.environ.get("BOB_USER",      f"bob@{DOMAIN}")
 BOB_PW    = os.environ.get("BOB_PASS",      "bobpass12")
+# small-quota mailbox for the quota-enforcement tests (dovecot-quota)
+CHARLIE   = os.environ.get("CHARLIE_USER",  f"charlie@{DOMAIN}")
+CHARLIE_PW = os.environ.get("CHARLIE_PASS", "charliepass12")
+CHARLIE_QUOTA_MB = 1
 SENDER    = f"sender@{DOMAIN}"
 
 # PostfixAdmin access (used to provision the mail domain and users)
@@ -66,6 +79,11 @@ PA_URL      = os.environ.get("POSTFIXADMIN_URL", "http://postfixadmin-proxy:8080
 SETUP_PW    = os.environ.get("SETUP_PASS",   "test123")
 ADMIN_EMAIL = os.environ.get("ADMIN_USER",   f"admin@{DOMAIN}")
 ADMIN_PW    = os.environ.get("ADMIN_PASS",   "Admin123pass")
+
+# SnappyMail access (webmail UI tests)
+SM_URL        = os.environ.get("SNAPPYMAIL_URL", "http://snappymail-proxy:8080")
+SM_ADMIN_USER = os.environ.get("SM_ADMIN_USER",  "admin")
+SM_ADMIN_PW   = os.environ.get("SM_ADMIN_PASS",  "12345")
 
 
 # ----------------------------------------------------------- Helpers -------
@@ -102,6 +120,23 @@ def build_message(subject: str, body: str = "test body",
     msg["To"]      = to
     msg["Message-ID"] = f"<{uuid.uuid4()}@{DOMAIN}>"
     return msg.as_string()
+
+
+def lmtp_deliver(host: str, rcpt: str, raw: bytes,
+                 sender: str = SENDER) -> tuple[int, str]:
+    """Deliver a mail to a dovecot service over LMTP (port 24) and return
+    the (code, text) the server gives after DATA — the exact interface
+    postfix uses for final delivery. Uses smtplib.LMTP, which speaks LHLO
+    and handles the multi-line greeting correctly."""
+    helo = f"tester.{DOMAIN}"
+    with smtplib.LMTP(host, 24, local_hostname=helo, timeout=20) as s:
+        s.ehlo(helo)                                 # LHLO
+        s.mail(sender)
+        code, resp = s.rcpt(rcpt)
+        if code >= 400:
+            return code, resp.decode(errors="replace")
+        code, resp = s.data(raw)                     # final per-recipient reply
+        return code, resp.decode(errors="replace")
 
 
 # rspamd greylisting is score-based: a mail with mildly-suspicious
@@ -180,7 +215,12 @@ def wait_for_services():
     wait_for_port(POSTFIX_STRICT, SMTP_P)
     wait_for_port(POSTFIX_LOG,    SMTP_P)
     wait_for_port(POSTFIX_NOCERT, SMTP_P)
+    wait_for_port(POSTFIX_TLSREQ, SMTP_P)
     wait_for_port(DOVECOT, IMAP_P)
+    wait_for_port(DOVECOT_QUOTA, IMAP_P)
+    wait_for_port(DOVECOT_MARK, IMAP_P)
+    wait_for_port(DOVECOT_FOLDER, IMAP_P)
+    wait_for_port(DOVECOT_CLEAR, IMAP_P)
     wait_for_port(DOVECOT, POP3_P)
     wait_for_port(DOVECOT, SIEVE_P)
     # rspamd(-strict|-log): controller port; healthchecks in compose
@@ -237,17 +277,72 @@ def provision_mail_accounts(wait_for_services, browser):
     page.wait_for_load_state("networkidle", timeout=10_000)
 
     # create the mailboxes (passwords must satisfy PostfixAdmin's policy:
-    # >=5 chars, >=3 letters, >=2 digits)
-    for local_part, password in (("alice", ALICE_PW), ("bob", BOB_PW)):
+    # >=5 chars, >=3 letters, >=2 digits). alice/bob are unlimited;
+    # charlie has a small quota for the quota-enforcement tests.
+    for local_part, password, quota_mb in (
+        ("alice", ALICE_PW, 0),
+        ("bob", BOB_PW, 0),
+        ("charlie", CHARLIE_PW, CHARLIE_QUOTA_MB),
+    ):
         page.goto(f"{PA_URL}/edit.php?table=mailbox", timeout=15_000)
         page.locator("[name='value[local_part]']").fill(local_part)
         page.locator("select[name='value[domain]']").select_option(DOMAIN)
         page.locator("[name='value[name]']").fill(local_part.capitalize())
         page.locator("[name='value[password]']").fill(password)
         page.locator("[name='value[password2]']").fill(password)
+        quota_field = page.locator("[name='value[quota]']")
+        if quota_field.count():
+            quota_field.fill(str(quota_mb))
         page.locator("[type=submit]").first.click()
         page.wait_for_load_state("networkidle", timeout=10_000)
 
+    page.close()
+
+
+@pytest.fixture(scope="session")
+def sm_domain_ready(provision_mail_accounts, browser):
+    """Configure the test.local domain in SnappyMail admin (once per
+    session) — shared by the webmail UI tests (test_webui.py) and the
+    OpenPGP flow (test_openpgp.py)."""
+    page = browser.new_page()
+    page.goto(f"{SM_URL}/?admin", timeout=30_000)
+    page.wait_for_load_state("networkidle", timeout=20_000)
+
+    # Admin login form — Login field has required attribute, must be filled
+    page.locator("input[name='Login']").fill(SM_ADMIN_USER)
+    page.locator("input[type=password]").fill(SM_ADMIN_PW)
+    page.locator("button.buttonLogin").click()
+    page.wait_for_load_state("networkidle", timeout=15_000)
+
+    # Navigate to Domains tab via href (more reliable than text lookup)
+    page.locator("a[href='#/domains']").click()
+    page.wait_for_load_state("networkidle", timeout=10_000)
+
+    # Add Domain is an <a> element (not a button)
+    page.locator("a[data-bind*='createDomain']").first.click()
+    page.wait_for_timeout(500)
+
+    # Fill IMAP/SMTP hosts BEFORE the domain Name to avoid the imapHostFocus
+    # auto-fill (which sets the host to the domain name when host is empty)
+    page.locator("input[name='IMAP[host]']").fill(DOVECOT)
+    page.locator("input[name='IMAP[port]']").fill("143")
+
+    # Switch to SMTP tab, then fill SMTP settings. Focusing the *empty* SMTP host
+    # triggers SnappyMail's smtpHostFocus binding, which mirrors the IMAP host
+    # into it (imap→smtp). A single fill then races and yields "dovecotpostfix".
+    # Fill once to make it non-empty (disabling the auto-fill), then set it again.
+    page.locator("label[for='tab-smtp']").click()
+    smtp_host = page.locator("input[name='SMTP[host]']")
+    smtp_host.fill("postfix")
+    smtp_host.fill("postfix")
+    page.locator("input[name='SMTP[port]']").fill("25")
+
+    # Fill domain Name last — hosts are already set so auto-fill won't overwrite
+    page.locator("input[name='Name']").fill(DOMAIN)
+
+    # Save is also an <a> element (not a button)
+    page.locator("footer a[data-bind*='createOrAddCommand']").click()
+    page.wait_for_load_state("networkidle", timeout=10_000)
     page.close()
 
 

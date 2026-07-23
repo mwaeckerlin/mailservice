@@ -1,0 +1,183 @@
+# Full mail environment for the domain «alice» — one half of the manual
+# two-domain scenario (see tests/manual/README.md).
+#
+# This is a TEST compose: it builds the project-own images via `../`
+# (inside the project boundary) so the setup is self-contained; foreign
+# images (mariadb) come from the hub. Server-to-server mail travels over
+# the shared `manual-mailnet` network, where this stack's postfix is
+# reachable as plain «alice» (Docker DNS A record; postfix falls back to
+# the A record when no MX exists). Nothing mail-related is published to
+# the host except the loopback UI/client ports below.
+#
+# DKIM_DMARC is `off` on purpose: there is no real DNS between the two
+# stacks, so SPF/DKIM/DMARC verification of the peer is impossible —
+# the spam reject threshold, GTUBE and the ClamAV virus reject stay
+# fully active (that is what the SPAM test case exercises).
+
+services:
+
+  postfixadmin-proxy:
+    image: mwaeckerlin/postfixadmin-proxy
+    build: ../../../postfixadmin-proxy
+    ports:
+      - "127.0.0.1:8080:8080"      # http://alice:8080 (admin UI, HTTP only)
+    networks:
+      - postfixadmin-frontend
+
+  postfixadmin:
+    image: mwaeckerlin/postfixadmin
+    build: ../../../postfixadmin
+    environment:
+      # setup password: test123 (fine for this offline playground)
+      SETUP_PASSWORD:            "$$2y$$12$$MHkqblkyo7WD0q6D3I7y9epJiZO9MqyN4AIYxmtn1NuyikRIvpDUy"
+      DATABASE_PASSWORD:         manualpass
+      EMAILCHECK_RESOLVE_DOMAIN: "NO"
+    networks:
+      - postfixadmin-frontend
+      - postfixadmin-backend
+
+  postfixadmin-db:
+    image: mariadb:11
+    environment:
+      MYSQL_RANDOM_ROOT_PASSWORD: "yes"
+      MYSQL_DATABASE: postfixadmin
+      MYSQL_USER:     postfixadmin
+      MYSQL_PASSWORD: manualpass
+    volumes:
+      - db-data:/var/lib/mysql
+    networks:
+      - postfixadmin-backend
+      - postfix-backend
+
+  redis:
+    image: mwaeckerlin/redis
+    volumes:
+      - redis-data:/data
+    networks:
+      - antispam
+
+  clamav:
+    image: mwaeckerlin/clamav
+    build: ../../../clamav
+    volumes:
+      - clamav-db:/var/lib/clamav
+    networks:
+      - antispam
+
+  rspamd:
+    image: mwaeckerlin/rspamd
+    build: ../../../rspamd
+    environment:
+      DOMAIN:      alice
+      DKIM_DMARC:  "off"           # no DNS between the stacks, see header
+      REDIS_HOST:  redis
+      CLAMAV_HOST: clamav
+    volumes:
+      - dkim-keys:/var/lib/rspamd
+    networks:
+      - antispam
+
+  dovecot:
+    image: mwaeckerlin/dovecot
+    build: ../../../dovecot
+    environment:
+      DB_NAME:     postfixadmin
+      DB_USER:     postfixadmin
+      DB_PASSWORD: manualpass
+      DB_HOST:     postfixadmin-db
+      DOMAIN:      alice
+    ports:
+      - "127.0.0.1:1993:993"       # IMAPS for a real mail client (alice:1993)
+    volumes:
+      - maildata:/var/mail/domains
+      - letsencrypt:/etc/letsencrypt:ro
+    networks:
+      - postfix-backend
+      - antispam
+
+  postfix:
+    image: mwaeckerlin/postfix
+    build: ../../../postfix
+    environment:
+      RSPAMD:      rspamd
+      HOSTNAME:    alice
+      HOSTROOT:    alice
+      DOMAIN:      alice
+      DB_NAME:     postfixadmin
+      DB_USER:     postfixadmin
+      DB_PASSWORD: manualpass
+      DB_HOST:     postfixadmin-db
+    ports:
+      - "127.0.0.1:1587:587"       # submission for a real mail client
+    volumes:
+      - postfix-spool:/var/spool/postfix
+      - letsencrypt:/etc/letsencrypt:ro
+    networks:
+      postfix-backend:
+      antispam:
+      mailnet:
+        aliases: [alice]           # what bob's postfix resolves and dials
+
+  snappymail-plugin-init:
+    image: mwaeckerlin/snappymail:plugin-init
+    build:
+      context: ../../../rainloop
+      dockerfile: Dockerfile.plugin-init
+    environment:
+      SNAPPYMAIL_DATA: /app/data
+    volumes:
+      - snappymail-data:/app/data
+    networks:
+      - snappymail-net
+
+  snappymail:
+    image: mwaeckerlin/snappymail:php-fpm
+    build:
+      context: ../../../rainloop
+      dockerfile: Dockerfile.php-fpm
+      target: php-fpm
+      args:
+        # this repo ships a placeholder release-signing key
+        SKIP_GPG_VERIFY: "1"
+    depends_on:
+      snappymail-plugin-init:
+        condition: service_completed_successfully
+    volumes:
+      - snappymail-data:/app/data
+    networks:
+      - postfix-backend
+      - snappymail-net
+
+  snappymail-proxy:
+    image: mwaeckerlin/snappymail:nginx
+    build:
+      context: ../../../rainloop
+      dockerfile: Dockerfile.nginx
+      args:
+        SKIP_GPG_VERIFY: "1"
+    ports:
+      - "127.0.0.1:8081:8080"      # http://alice:8081 (webmail)
+    networks:
+      - snappymail-net
+
+networks:
+  postfixadmin-frontend:
+  postfixadmin-backend:
+  postfix-backend:
+  antispam:
+  snappymail-net:
+  mailnet:
+    external: true
+    name: manual-mailnet
+
+volumes:
+  db-data:
+  redis-data:
+  clamav-db:
+  dkim-keys:
+  maildata:
+  postfix-spool:
+  snappymail-data:
+  letsencrypt:
+    external: true
+    name: manual-letsencrypt

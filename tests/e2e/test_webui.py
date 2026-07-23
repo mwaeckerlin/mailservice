@@ -17,7 +17,7 @@ import uuid
 import pytest
 from playwright.sync_api import Browser, Page, expect
 
-from conftest import imap_starttls
+from conftest import imap_starttls, smtp_send
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -73,49 +73,8 @@ def wait_for_ui_services():
     _wait_http(f"{SM_URL}/")
 
 
-@pytest.fixture(scope="session")
-def sm_domain_ready(browser: Browser):
-    """Configure test.local domain in SnappyMail admin (once per session)."""
-    page = browser.new_page()
-    page.goto(f"{SM_URL}/?admin", timeout=30_000)
-    page.wait_for_load_state("networkidle", timeout=20_000)
-
-    # Admin login form — Login field has required attribute, must be filled
-    page.locator("input[name='Login']").fill(SM_ADMIN_USER)
-    page.locator("input[type=password]").fill(SM_ADMIN_PW)
-    page.locator("button.buttonLogin").click()
-    page.wait_for_load_state("networkidle", timeout=15_000)
-
-    # Navigate to Domains tab via href (more reliable than text lookup)
-    page.locator("a[href='#/domains']").click()
-    page.wait_for_load_state("networkidle", timeout=10_000)
-
-    # Add Domain is an <a> element (not a button)
-    page.locator("a[data-bind*='createDomain']").first.click()
-    page.wait_for_timeout(500)
-
-    # Fill IMAP/SMTP hosts BEFORE the domain Name to avoid the imapHostFocus
-    # auto-fill (which sets the host to the domain name when host is empty)
-    page.locator("input[name='IMAP[host]']").fill(DOVECOT)
-    page.locator("input[name='IMAP[port]']").fill("143")
-
-    # Switch to SMTP tab, then fill SMTP settings. Focusing the *empty* SMTP host
-    # triggers SnappyMail's smtpHostFocus binding, which mirrors the IMAP host
-    # into it (imap→smtp). A single fill then races and yields "dovecotpostfix".
-    # Fill once to make it non-empty (disabling the auto-fill), then set it again.
-    page.locator("label[for='tab-smtp']").click()
-    smtp_host = page.locator("input[name='SMTP[host]']")
-    smtp_host.fill("postfix")
-    smtp_host.fill("postfix")
-    page.locator("input[name='SMTP[port]']").fill("25")
-
-    # Fill domain Name last — hosts are already set so auto-fill won't overwrite
-    page.locator("input[name='Name']").fill(DOMAIN)
-
-    # Save is also an <a> element (not a button)
-    page.locator("footer a[data-bind*='createOrAddCommand']").click()
-    page.wait_for_load_state("networkidle", timeout=10_000)
-    page.close()
+# sm_domain_ready (SnappyMail domain provisioning) lives in conftest.py —
+# shared with test_openpgp.py.
 
 
 # ── PostfixAdmin tests ────────────────────────────────────────────────────────
@@ -333,3 +292,92 @@ def test_snappymail_send_mail(browser: Browser, sm_domain_ready):
             break
         time.sleep(2)
     assert messages, f"Bob did not receive mail with subject '{subject}'"
+
+
+def test_snappymail_transport_security_banner(browser: Browser, sm_domain_ready):
+    """A mail delivered over a plaintext hop carries
+    `X-Transport-Security: none`; the transport-security plugin shows a
+    red «UNENCRYPTED» banner when the message is opened in the webmail.
+    Proves the whole chain: postfix macro → rspamd header → SnappyMail
+    plugin → visible marker."""
+    # plaintext SMTP on port 25 → the message is stamped
+    # X-Transport-Security: none by rspamd. smtp_send retries the
+    # score-based greylisting 451 like a real MTA.
+    subject = smtp_send(f"SM-XTS-{uuid.uuid4().hex[:8]}", to=ALICE)
+    time.sleep(3)
+
+    page = browser.new_page()
+    page.goto(SM_URL, timeout=30_000)
+    page.wait_for_load_state("networkidle", timeout=20_000)
+    page.get_by_placeholder("Email", exact=False).fill(ALICE)
+    page.locator("input[type=password]").fill(ALICE_PW)
+    page.get_by_role("button", name="Sign in").click()
+    page.wait_for_load_state("networkidle", timeout=20_000)
+
+    # open the message from the list
+    row = page.get_by_text(subject, exact=False)
+    expect(row.first).to_be_visible(timeout=30_000)
+    row.first.click()
+
+    # the plugin injects #transport-security-banner into the message view
+    banner = page.locator("#transport-security-banner")
+    expect(banner).to_be_visible(timeout=20_000)
+    assert "UNENCRYPTED" in (banner.inner_text() or ""), (
+        f"transport-security banner text unexpected: {banner.inner_text()!r}"
+    )
+    assert "transport-insecure" in (
+        banner.get_attribute("class") or ""), (
+        "banner is not styled as insecure (red)"
+    )
+    page.close()
+
+
+def test_snappymail_transport_security_no_banner_for_tls(browser: Browser, sm_domain_ready):
+    """A mail submitted over STARTTLS carries `X-Transport-Security:
+    TLSv1.x`; the plugin shows NO banner. This proves the plugin reads
+    the real header value — otherwise (if the server-side fetch always
+    returned empty) even a TLS mail would be flagged."""
+    import smtplib
+    import ssl
+
+    from conftest import build_message
+
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+
+    subject = f"SM-XTS-ok-{uuid.uuid4().hex[:8]}"
+    POSTFIX = os.environ.get("POSTFIX_HOST", "postfix")
+    SUBM_P  = int(os.environ.get("SUBMISSION_PORT", "587"))
+
+    # authenticated STARTTLS submission (not greylisted for own users) →
+    # rspamd stamps a real TLS version into X-Transport-Security
+    with smtplib.SMTP(POSTFIX, SUBM_P, timeout=15) as s:
+        s.ehlo(f"testhost.{DOMAIN}")
+        s.starttls(context=ctx)
+        s.ehlo(f"testhost.{DOMAIN}")
+        s.login(ALICE, ALICE_PW)
+        s.sendmail(ALICE, [ALICE],
+                   build_message(subject, from_=ALICE, to=ALICE))
+    time.sleep(3)
+
+    page = browser.new_page()
+    page.goto(SM_URL, timeout=30_000)
+    page.wait_for_load_state("networkidle", timeout=20_000)
+    page.get_by_placeholder("Email", exact=False).fill(ALICE)
+    page.locator("input[type=password]").fill(ALICE_PW)
+    page.get_by_role("button", name="Sign in").click()
+    page.wait_for_load_state("networkidle", timeout=20_000)
+
+    row = page.get_by_text(subject, exact=False)
+    expect(row.first).to_be_visible(timeout=30_000)
+    row.first.click()
+
+    # give the plugin the same chance to run as in the positive test,
+    # then assert it did NOT flag this TLS-transported mail
+    page.wait_for_timeout(4_000)
+    assert page.locator("#transport-security-banner").count() == 0, (
+        "plugin flagged a TLS-transported mail — it is not reading the "
+        "real X-Transport-Security value"
+    )
+    page.close()

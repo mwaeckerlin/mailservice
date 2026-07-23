@@ -7,6 +7,10 @@ migration must preserve:
 
   - the SMTP banner and EHLO answer on port 25 (the daemon actually
     boots and speaks SMTP)
+  - smtp-relay's core purpose: a mail for a foreign domain is accepted
+    from the internal network and REALLY relayed — MX lookup via the
+    isolated resolver, delivery to fake-smtp behind extern.local —
+    asserted end-to-end by reading fake-smtp's mail store
   - smtp-relay-tls offers STARTTLS with the mounted certificate and
     completes a handshake
   - mailforward's core purpose: a mail to a mapped virtual alias is
@@ -42,12 +46,40 @@ def _ehlo_ok(host: str) -> smtplib.SMTP:
     return conn
 
 
+def _assert_in_fake_store(subject: str, what: str) -> None:
+    """Wait until a mail containing `subject` shows up in fake-smtp's
+    mail store — the proof that a relay/forward REALLY left the image
+    under test and reached the target domain's MX."""
+    deadline = time.time() + 60
+    store = pathlib.Path(FAKE_MAILS_DIR)
+    while time.time() < deadline:
+        for f in store.rglob("*"):
+            if f.is_file() and subject in f.read_text(errors="replace"):
+                return
+        time.sleep(2)
+    pytest.fail(f"{what} not found in fake-smtp store {store}")
+
+
 # ----------------------------------------------------------------- Tests ---
 
 def test_smtp_relay_banner_and_ehlo():
     """smtp-relay boots and answers 220 + EHLO 250 on port 25."""
     with _ehlo_ok(SMTP_RELAY) as conn:
         assert conn.has_extn("PIPELINING"), "postfix EHLO keywords missing"
+
+
+def test_smtp_relay_relays_to_external_mx(unique_subject):
+    """smtp-relay's core purpose: mail for a foreign domain, submitted
+    from the internal network, is accepted and relayed — real MX lookup
+    for extern.local via the isolated resolver, real delivery to
+    fake-smtp — not just accepted into a queue."""
+    sender = f"app@{DOMAIN}"
+    rcpt = "relay-sink@extern.local"
+    with _ehlo_ok(SMTP_RELAY) as conn:
+        result = conn.sendmail(
+            sender, [rcpt], build_message(unique_subject, from_=sender, to=rcpt))
+    assert result == {}, f"smtp-relay refused the relay submission: {result!r}"
+    _assert_in_fake_store(unique_subject, "relayed mail")
 
 
 def test_smtp_relay_tls_starttls_handshake():
@@ -76,15 +108,7 @@ def test_mailforward_forwards_mapped_alias(unique_subject):
             sender, [FWD_ADDRESS],
             build_message(unique_subject, from_=sender, to=FWD_ADDRESS))
     assert result == {}, f"mailforward refused the mapped alias: {result!r}"
-
-    deadline = time.time() + 60
-    store = pathlib.Path(FAKE_MAILS_DIR)
-    while time.time() < deadline:
-        for f in store.rglob("*"):
-            if f.is_file() and unique_subject in f.read_text(errors="replace"):
-                return
-        time.sleep(2)
-    pytest.fail(f"forwarded mail not found in fake-smtp store {store}")
+    _assert_in_fake_store(unique_subject, "forwarded mail")
 
 
 def test_mailforward_rejects_unmapped_recipient(unique_subject):

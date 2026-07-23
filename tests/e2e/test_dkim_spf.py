@@ -77,3 +77,22 @@ def test_spf_result_in_authentication_results(unique_subject):
         "Expected spf=pass in Authentication-Results (test-runner is "
         f"inside the SPF ip4:10.0.0.0/8 allow-list). Got: {ar!r}"
     )
+
+
+def test_authserv_id_in_authentication_results(unique_subject):
+    """The AUTHSERV_ID env is wired into the Authentication-Results
+    authserv-id (the identity a downstream DMARC evaluator trusts). The
+    e2e rspamd sets AUTHSERV_ID=mail.test.local; the A-R header must
+    begin with exactly that identifier, not rspamd's hostname fallback.
+    Proves the wiring is effective, not a silently-ignored config key."""
+    smtp_send(unique_subject)
+    with imap_starttls() as conn:
+        conn.login(ALICE, ALICE_PW)
+        msgs = _wait_for_mail(conn, unique_subject)
+        assert msgs, f"Mail '{unique_subject}' not found"
+        msg = _fetch_message(conn, msgs[0])
+    ar = " ".join(msg.get_all("Authentication-Results", []))
+    assert "mail.test.local" in ar, (
+        "Expected the wired AUTHSERV_ID 'mail.test.local' as the "
+        f"authserv-id in Authentication-Results. Got: {ar!r}"
+    )

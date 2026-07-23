@@ -3,3 +3,5 @@ pytest-playwright>=0.7.0
 playwright==1.60.0
 # DKIM signing/verification simulator for test_dkim_verify.py
 dkimpy>=1.1
+# direct schema-version assertions for test_schema_upgrade.py
+pymysql>=1.1
