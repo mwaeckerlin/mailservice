@@ -46,18 +46,28 @@ def _ehlo_ok(host: str) -> smtplib.SMTP:
     return conn
 
 
-def _assert_in_fake_store(subject: str, what: str) -> None:
+def _find_in_fake_store(subject: str, timeout: int = 60) -> str:
     """Wait until a mail containing `subject` shows up in fake-smtp's
-    mail store — the proof that a relay/forward REALLY left the image
-    under test and reached the target domain's MX."""
-    deadline = time.time() + 60
+    mail store and return its full text ('' on timeout) — the proof
+    that a relay/forward REALLY left the image under test and reached
+    the target domain's MX."""
+    deadline = time.time() + timeout
     store = pathlib.Path(FAKE_MAILS_DIR)
     while time.time() < deadline:
         for f in store.rglob("*"):
-            if f.is_file() and subject in f.read_text(errors="replace"):
-                return
+            if f.is_file():
+                text = f.read_text(errors="replace")
+                if subject in text:
+                    return text
         time.sleep(2)
-    pytest.fail(f"{what} not found in fake-smtp store {store}")
+    return ""
+
+
+def _assert_in_fake_store(subject: str, what: str) -> str:
+    text = _find_in_fake_store(subject)
+    if not text:
+        pytest.fail(f"{what} not found in fake-smtp store {FAKE_MAILS_DIR}")
+    return text
 
 
 # ----------------------------------------------------------------- Tests ---
@@ -80,6 +90,40 @@ def test_smtp_relay_relays_to_external_mx(unique_subject):
             sender, [rcpt], build_message(unique_subject, from_=sender, to=rcpt))
     assert result == {}, f"smtp-relay refused the relay submission: {result!r}"
     _assert_in_fake_store(unique_subject, "relayed mail")
+
+
+def test_smtp_relay_milter_hook_effective(unique_subject):
+    """The generic milter hook (`OPENDKIM` env, historical name) really
+    feeds the mail through the wired milter: the relayed mail carries
+    rspamd's verdict headers — the hook is effective, not just a
+    rendered config line."""
+    sender = f"app@{DOMAIN}"
+    rcpt = "milter-sink@extern.local"
+    with _ehlo_ok(SMTP_RELAY) as conn:
+        result = conn.sendmail(
+            sender, [rcpt], build_message(unique_subject, from_=sender, to=rcpt))
+    assert result == {}, f"smtp-relay refused the submission: {result!r}"
+    text = _assert_in_fake_store(unique_subject, "milter-scanned relayed mail")
+    assert "X-Spamd-Result" in text or "X-Spam-Status" in text, (
+        "relayed mail carries no rspamd verdict header — the OPENDKIM "
+        "milter hook is not effective"
+    )
+
+
+def test_mailforward_milter_hook_effective(unique_subject):
+    """Same for mailforward's `GREYLIST` hook (historical name): the
+    forwarded mail must carry rspamd's verdict headers."""
+    sender = f"someone@{DOMAIN}"
+    with _ehlo_ok(MAILFORWARD) as conn:
+        result = conn.sendmail(
+            sender, [FWD_ADDRESS],
+            build_message(unique_subject, from_=sender, to=FWD_ADDRESS))
+    assert result == {}, f"mailforward refused the submission: {result!r}"
+    text = _assert_in_fake_store(unique_subject, "milter-scanned forward")
+    assert "X-Spamd-Result" in text or "X-Spam-Status" in text, (
+        "forwarded mail carries no rspamd verdict header — the GREYLIST "
+        "milter hook is not effective"
+    )
 
 
 def test_smtp_relay_tls_starttls_handshake():

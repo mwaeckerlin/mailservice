@@ -148,6 +148,10 @@ services:
   # log: verify + Authentication-Results stamping only, never reject.
   # Used to prove that after an upgrade an admin sees the DKIM/DMARC
   # verdict without any legitimate mail being bounced.
+  # RSPAMD_BAYES_PER_USER is exercised on THIS instance (its Bayes is
+  # otherwise unused — the autolearn tests train the main rspamd): the
+  # per-user knob must produce per-recipient classifier state in redis.
+  # See test_bayes_per_user.py.
   rspamd-log:
     build: ../../rspamd
     environment:
@@ -159,6 +163,7 @@ services:
       RSPAMD_REJECT_SCORE:   "15"
       RSPAMD_LOCAL_ADDRS:    "127.0.0.0/8"
       RSPAMD_SIGN_NETWORKS:  "127.0.0.0/8"
+      RSPAMD_BAYES_PER_USER: "true"
     volumes:
       - dkim-keys-log:/var/lib/rspamd
     dns: ["10.100.0.2"]
@@ -173,6 +178,62 @@ services:
       timeout: 5s
       retries: 20
       start_period: 5s
+
+  # RSPAMD_CHECK_LOCAL=true + local_addrs covering the test-runner's
+  # 10.x network: even a LOCAL client's doubtful mail is greylisted —
+  # the opt-in that removes the local bypass. DKIM_DMARC=permissive so
+  # the greylist module is active. See
+  # test_greylisting.py::test_check_local_greylists_local_clients.
+  rspamd-checklocal:
+    build: ../../rspamd
+    environment:
+      DOMAINS:               "test.local"
+      AUTHSERV_ID:           "mail.test.local"
+      DKIM_DMARC:            "permissive"
+      REDIS_HOST:            "redis"
+      CLAMAV_HOST:           "clamav"
+      RSPAMD_REJECT_SCORE:   "15"
+      RSPAMD_LOCAL_ADDRS:    "10.0.0.0/8, 127.0.0.0/8"
+      RSPAMD_SIGN_NETWORKS:  "10.0.0.0/8, 127.0.0.0/8"
+      RSPAMD_CHECK_LOCAL:    "true"
+      RSPAMD_GREYLIST_TIMEOUT: "5s"
+      RSPAMD_GREYLIST_EXPIRE:  "1h"
+    volumes:
+      - dkim-keys-checklocal:/var/lib/rspamd
+    dns: ["10.100.0.2"]
+    depends_on:
+      dns:    { condition: service_healthy }
+      redis:  { condition: service_healthy }
+      clamav: { condition: service_healthy }
+    networks: [antispam, dns-net]
+    healthcheck:
+      test: ["CMD", "/usr/bin/init", "--healthcheck"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  # One-shot-style helper for the DKIM-key NOTIFY feature: a fresh
+  # rspamd (no key volume — keys regenerate on every start) that mails
+  # the generated DNS records to fake-smtp (NOTIFY_SMTP must be a
+  # numeric address — fake-smtp has the fixed 10.100.0.99). See
+  # test_dkim_notify.py.
+  rspamd-notify:
+    build: ../../rspamd
+    environment:
+      DOMAIN:        "notify.local"
+      DKIM_DMARC:    "off"
+      REDIS_HOST:    "redis"
+      CLAMAV_HOST:   "clamav"
+      NOTIFY_EMAIL:  "hostmaster@extern.local"
+      NOTIFY_SMTP:   "10.100.0.99:25"
+    dns: ["10.100.0.2"]
+    depends_on:
+      dns:       { condition: service_healthy }
+      redis:     { condition: service_healthy }
+      clamav:    { condition: service_healthy }
+      fake-smtp: { condition: service_started }
+    networks: [antispam, dns-net]
 
   postfix:
     build: ../../postfix
@@ -251,6 +312,32 @@ services:
       certs-init:      { condition: service_completed_successfully }
     networks: [mail, antispam, db-net, dns-net]
 
+  # MX wired to the check-local rspamd — the greylist opt-in that also
+  # delays local clients. See test_greylisting.py.
+  postfix-checklocal:
+    build: ../../postfix
+    hostname: postfix-checklocal.test.local
+    environment:
+      RSPAMD:         rspamd-checklocal
+      DOMAIN:         test.local
+      HOSTNAME:       mail.test.local
+      HOSTROOT:       test.local
+      DB_HOST:        postfixadmin-db
+      DB_USER:        postfixadmin
+      DB_PASSWORD:    testpass
+      DB_NAME:        postfixadmin
+      DISABLE_DNSBL:  "yes"
+      MYNETWORKS:     "127.0.0.0/8"
+    dns: ["10.100.0.2"]
+    volumes:
+      - letsencrypt:/etc/letsencrypt:ro
+    depends_on:
+      postfixadmin-db:   { condition: service_healthy }
+      rspamd-checklocal: { condition: service_healthy }
+      dns:               { condition: service_healthy }
+      certs-init:        { condition: service_completed_successfully }
+    networks: [mail, antispam, db-net, dns-net]
+
   # No TLS certificate on purpose: pins the no-cert secure default of
   # the postfix image — SASL must be disabled entirely (stack invariant:
   # passwords never travel unencrypted; same behaviour as dovecot, where
@@ -269,6 +356,29 @@ services:
       DB_NAME:        postfixadmin
       DISABLE_DNSBL:  "yes"
       MYNETWORKS:     "127.0.0.0/8"
+    depends_on:
+      postfixadmin-db: { condition: service_healthy }
+      dovecot:         { condition: service_started }
+    networks: [mail, db-net]
+
+  # POSTFIX_ALLOW_CLEARTEXT_AUTH=yes on the certless image: the
+  # documented deliberate softening — SASL is then offered and works
+  # without TLS (the secure default on postfix-nocert refuses it).
+  # See test_tls.py::test_cleartext_auth_optin_smtp.
+  postfix-nocert-clear:
+    build: ../../postfix
+    hostname: postfix-nocert-clear.test.local
+    environment:
+      DOMAIN:         test.local
+      HOSTNAME:       mail.test.local
+      HOSTROOT:       test.local
+      DB_HOST:        postfixadmin-db
+      DB_USER:        postfixadmin
+      DB_PASSWORD:    testpass
+      DB_NAME:        postfixadmin
+      DISABLE_DNSBL:  "yes"
+      MYNETWORKS:     "127.0.0.0/8"
+      POSTFIX_ALLOW_CLEARTEXT_AUTH: "yes"
     depends_on:
       postfixadmin-db: { condition: service_healthy }
       dovecot:         { condition: service_started }
@@ -398,6 +508,28 @@ services:
       postfixadmin-db: { condition: service_healthy }
     networks: [mail, db-net]
 
+  # DEFAULT_PASS_SCHEME=PLAIN on its own instance (a shared one would
+  # break the crypt-hashed regular accounts): the legacy-migration
+  # scenario — an imported database row with a bare PLAIN password must
+  # authenticate. Cleartext login allowed so the test can log in
+  # directly. See test_imap.py::test_default_pass_scheme_effective.
+  dovecot-passscheme:
+    build: ../../dovecot
+    environment:
+      DB_HOST:                  postfixadmin-db
+      DB_USER:                  postfixadmin
+      DB_PASSWORD:              testpass
+      DB_NAME:                  postfixadmin
+      DOMAIN:                   test.local
+      DOVECOT_ALLOW_CLEARTEXT:  "yes"
+      DOVECOT_DEBUG_AUTH:       "yes"
+      DEFAULT_PASS_SCHEME:      "PLAIN"
+    volumes:
+      - maildata-passscheme:/var/mail/domains
+    depends_on:
+      postfixadmin-db: { condition: service_healthy }
+    networks: [mail, db-net]
+
   # SPAM_DELIVERY_MODE=folder: mail carrying X-Spam-Flag: YES is routed
   # to the recipient's Junk folder by the server-side sieve_before rule
   # (silent quarantine — the documented, not-recommended opt-in). Own
@@ -451,6 +583,11 @@ services:
       # the isolated e2e resolver cannot answer the RBL zones — every
       # lookup would stall the SMTP dialogue until the resolver timeout
       DISABLE_DNSBL: "yes"
+      # generic milter hook (historical name from the opendkim era):
+      # wire the relay to the rspamd milter and prove the hook is
+      # EFFECTIVE — the relayed mail must carry rspamd's headers.
+      # See test_relay_family.py::test_smtp_relay_milter_hook_effective.
+      OPENDKIM: "rspamd:11332"
     # the isolated resolver lets the relay do a REAL MX lookup for
     # extern.local and deliver to fake-smtp — pinning the image's core
     # purpose (accept + relay), not just banner/EHLO. See
@@ -459,7 +596,8 @@ services:
     depends_on:
       dns:       { condition: service_healthy }
       fake-smtp: { condition: service_started }
-    networks: [mail, dns-net]
+      rspamd:    { condition: service_healthy }
+    networks: [mail, dns-net, antispam]
 
   smtp-relay-tls:
     build: ../../smtp-relay-tls
@@ -482,11 +620,16 @@ services:
       # the isolated e2e resolver cannot answer the RBL zones — every
       # lookup would stall the SMTP dialogue until the resolver timeout
       DISABLE_DNSBL: "yes"
+      # generic milter hook (historical name from the milter-greylist
+      # era) — wired to rspamd and proven effective by
+      # test_relay_family.py::test_mailforward_milter_hook_effective.
+      GREYLIST: "rspamd:11332"
     dns: ["10.100.0.2"]
     depends_on:
       dns:       { condition: service_healthy }
       fake-smtp: { condition: service_started }
-    networks: [mail, dns-net]
+      rspamd:    { condition: service_healthy }
+    networks: [mail, dns-net, antispam]
 
   # Single shared database for PostfixAdmin, Postfix and Dovecot (mirrors the
   # production stack). Accounts are created through PostfixAdmin, not pre-seeded.
@@ -518,6 +661,14 @@ services:
       MAILBOXES:              "10"
       MAXQUOTA:               "10"
       DOMAIN_QUOTA_DEFAULT:   "2048"
+      # branding knobs — rendered into the UI, pinned by
+      # test_webui.py::test_postfixadmin_branding_rendered
+      FOOTER_TEXT:            "E2E Footer Contract"
+      FOOTER_LINK:            "https://example.test/footer"
+      # default role aliases need a target (ADDRESS or DOMAIN), else
+      # the list stays empty — pinned by
+      # test_webui.py::test_postfixadmin_default_aliases_created
+      DEFAULT_ALIASES_ADDRESS: "alice@test.local"
     depends_on:
       postfixadmin-db: { condition: service_healthy }
     networks: [ui-net]
@@ -627,10 +778,14 @@ services:
       postfix-strict:     { condition: service_started }
       postfix-log:        { condition: service_started }
       postfix-nocert:     { condition: service_started }
+      postfix-nocert-clear: { condition: service_started }
+      postfix-checklocal: { condition: service_started }
+      rspamd-notify:      { condition: service_started }
       dovecot:            { condition: service_started }
       dovecot-mark:       { condition: service_started }
       dovecot-folder:     { condition: service_started }
       dovecot-cleartext:  { condition: service_started }
+      dovecot-passscheme: { condition: service_started }
       postfixadmin-proxy: { condition: service_started }
       postfixadmin-upgrade-proxy: { condition: service_started }
       snappymail-proxy:   { condition: service_started }
@@ -642,10 +797,14 @@ services:
       POSTFIX_STRICT_HOST: postfix-strict
       POSTFIX_LOG_HOST:    postfix-log
       POSTFIX_NOCERT_HOST: postfix-nocert
+      POSTFIX_NOCERT_CLEAR_HOST: postfix-nocert-clear
+      POSTFIX_CHECKLOCAL_HOST: postfix-checklocal
+      RSPAMD_LOG_CTL_URL: "http://rspamd-log:11334"
       DOVECOT_HOST:        dovecot
       DOVECOT_MARK_HOST:   dovecot-mark
       DOVECOT_FOLDER_HOST: dovecot-folder
       DOVECOT_CLEARTEXT_HOST: dovecot-cleartext
+      DOVECOT_PASSSCHEME_HOST: dovecot-passscheme
       RSPAMD_HOST:         rspamd
       RSPAMD_STRICT_HOST:  rspamd-strict
       RSPAMD_LOG_HOST:     rspamd-log
@@ -701,6 +860,7 @@ volumes:
   dkim-keys:
   dkim-keys-strict:
   dkim-keys-log:
+  dkim-keys-checklocal:
   clamav-db:
     # survives `docker compose down -v` — tests/run-e2e.sh creates it
     # once; delete manually (docker volume rm mailservice-e2e-clamav-db)
@@ -713,4 +873,5 @@ volumes:
   maildata-mark:
   maildata-folder:
   maildata-cleartext:
+  maildata-passscheme:
   letsencrypt:

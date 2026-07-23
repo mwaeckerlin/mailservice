@@ -300,7 +300,10 @@ clear or with obsolete TLS. To make that visible instead of silent:
 
 Set `DOVECOT_QUOTA=yes` on the `dovecot` service to enforce a per-mailbox
 quota taken from the PostfixAdmin `mailbox.quota` column (bytes; `0` =
-unlimited, the default). A mailbox with no quota is unaffected. When a
+unlimited, the default). The env is deliberately an on/off switch and
+not a size: the limit is **per-mailbox data** maintained in the admin
+UI (each mailbox its own value), so a single global size would either
+override or duplicate it. A mailbox with no quota is unaffected. When a
 mailbox is full, delivery returns a **temporary** failure so the sending
 server retries — never a silent drop, in line with the
 reliability-over-filtering philosophy. Pinned by the `dovecot-quota` e2e

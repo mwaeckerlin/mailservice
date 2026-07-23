@@ -35,8 +35,8 @@ import ssl
 import time
 
 from conftest import (
-    POSTFIX, SMTP_P, DOVECOT, IMAP_P, ALICE, ALICE_PW, BOB, DOMAIN,
-    GREYLIST_RETRY_DELAY, build_message, imap_starttls,
+    POSTFIX, POSTFIX_CHECKLOCAL, SMTP_P, DOVECOT, IMAP_P, ALICE, ALICE_PW,
+    BOB, DOMAIN, GREYLIST_RETRY_DELAY, build_message, imap_starttls,
 )
 
 
@@ -117,6 +117,42 @@ def test_midscore_mail_greylisted_then_accepted(unique_subject):
     )
     assert _wait_for_mail(subject), (
         "greylisted-then-accepted mail never arrived in INBOX"
+    )
+
+
+def test_check_local_greylists_local_clients(unique_subject):
+    """RSPAMD_CHECK_LOCAL=true removes the local-client greylist bypass:
+    on the check-local stack the test-runner's network IS inside
+    local_addrs, and a mid-score mail still draws the 4xx (then passes
+    on retry). Pins the opt-in's effect; the default bypass direction
+    cannot be reproduced in this stack (the headless containers offer
+    no way to originate mail from inside local_addrs of the main
+    instance), which is documented here as the technical limit."""
+    sender = f"grey-local-{unique_subject.lower()}@{DOMAIN}"
+    raw = (f"X-Spam-Flag: YES\r\n"
+           + build_message(f"grey-local-{unique_subject}",
+                           from_=sender)).encode()
+
+    def _attempt() -> int:
+        try:
+            with smtplib.SMTP(POSTFIX_CHECKLOCAL, SMTP_P, timeout=15) as s:
+                s.ehlo(f"testhost.{DOMAIN}")
+                s.mail(sender)
+                s.rcpt(ALICE)
+                code, _ = s.data(raw)
+                return code
+        except smtplib.SMTPResponseException as e:
+            return e.smtp_code
+
+    first = _attempt()
+    assert 400 <= first < 500, (
+        f"check-local stack did not greylist a local client's mid-score "
+        f"mail (got {first}) — RSPAMD_CHECK_LOCAL is not effective"
+    )
+    time.sleep(GREYLIST_RETRY_DELAY)
+    second = _attempt()
+    assert 200 <= second < 300, (
+        f"greylisted mail was not accepted on retry (got {second})"
     )
 
 

@@ -22,7 +22,8 @@ import time
 import uuid
 
 from conftest import (
-    POSTFIX, POSTFIX_NOCERT, POSTFIX_TLSREQ, SMTP_P, SUBM_P, SMTPS_P,
+    POSTFIX, POSTFIX_NOCERT, POSTFIX_NOCERT_CLEAR, POSTFIX_TLSREQ,
+    SMTP_P, SUBM_P, SMTPS_P,
     DOVECOT, DOVECOT_CLEAR, IMAP_P, POP3_P, ALICE, ALICE_PW, BOB, BOB_PW,
     DOMAIN, build_message, smtp_send, imap_starttls,
 )
@@ -279,6 +280,22 @@ def test_imaps_login_on_993():
         assert typ == "OK", "IMAPS login on 993 failed"
         typ, _ = conn.select("INBOX")
         assert typ == "OK"
+
+
+def test_cleartext_auth_optin_smtp():
+    """POSTFIX_ALLOW_CLEARTEXT_AUTH=yes on a certless stack: the
+    documented deliberate softening actually opens SASL without TLS —
+    AUTH is advertised and a login with valid credentials succeeds on
+    the opt-in service (the secure default refuses both, pinned by
+    test_smtp_auth_disabled_without_cert)."""
+    with smtplib.SMTP(POSTFIX_NOCERT_CLEAR, SMTP_P, timeout=15) as s:
+        code, _ = s.ehlo(f"testhost.{DOMAIN}")
+        assert code == 250
+        assert s.has_extn("auth"), (
+            "opt-in service does not advertise AUTH without TLS — "
+            "POSTFIX_ALLOW_CLEARTEXT_AUTH is not effective"
+        )
+        s.login(ALICE, ALICE_PW)
 
 
 def test_cleartext_optin_imap_login():

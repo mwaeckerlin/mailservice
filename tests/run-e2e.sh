@@ -38,9 +38,11 @@ bash tests/image-contract.sh \
     e2e-rspamd e2e-rspamd-strict e2e-rspamd-log \
     e2e-clamav \
     e2e-postfix e2e-postfix-strict e2e-postfix-log e2e-postfix-nocert \
+    e2e-postfix-nocert-clear e2e-postfix-checklocal \
     e2e-postfix-tlsreq \
+    e2e-rspamd-checklocal e2e-rspamd-notify \
     e2e-dovecot e2e-dovecot-quota e2e-dovecot-mark e2e-dovecot-folder \
-    e2e-dovecot-cleartext \
+    e2e-dovecot-cleartext e2e-dovecot-passscheme \
     e2e-smtp-relay e2e-smtp-relay-tls e2e-mailforward \
     e2e-postfixadmin e2e-postfixadmin-proxy e2e-snappymail e2e-snappymail-proxy
 bash tests/snappymail-gnupg.sh e2e-snappymail
@@ -48,9 +50,11 @@ bash tests/snappymail-gnupg.sh e2e-snappymail
 echo "==> Starting services..."
 if ! docker compose -f "$COMPOSE" up -d --remove-orphans \
     redis clamav \
-    rspamd rspamd-strict rspamd-log \
-    postfix postfix-strict postfix-log postfix-nocert postfix-tlsreq \
+    rspamd rspamd-strict rspamd-log rspamd-checklocal rspamd-notify \
+    postfix postfix-strict postfix-log postfix-nocert postfix-nocert-clear \
+    postfix-checklocal postfix-tlsreq \
     dovecot dovecot-quota dovecot-mark dovecot-folder dovecot-cleartext \
+    dovecot-passscheme \
     dns fake-smtp \
     smtp-relay smtp-relay-tls mailforward \
     postfixadmin-db postfixadmin postfixadmin-proxy \
@@ -79,9 +83,11 @@ if [[ $EXIT -ne 0 ]]; then
     # per-service tail — a shared tail lets the chattiest service
     # (dovecot) crowd out the decision logs of the others
     for svc in postfix postfix-strict postfix-log postfix-tlsreq \
-               rspamd rspamd-strict rspamd-log \
+               postfix-checklocal postfix-nocert-clear \
+               rspamd rspamd-strict rspamd-log rspamd-checklocal \
+               rspamd-notify \
                redis clamav dovecot dovecot-quota dovecot-mark dovecot-folder \
-               dovecot-cleartext \
+               dovecot-cleartext dovecot-passscheme \
                postfixadmin-old-init postfixadmin-upgrade \
                snappymail-init snappymail snappymail-proxy \
                smtp-relay smtp-relay-tls mailforward; do

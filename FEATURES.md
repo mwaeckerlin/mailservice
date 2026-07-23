@@ -106,6 +106,37 @@ coverage guard in the test suite.
 - **F19 — Database schema upgrade after an image update.** When a newer
   PostfixAdmin image runs on an existing database, opening `setup.php`
   migrates the schema in place; accounts and mail are untouched.
+- **F20 — Generic milter hooks on the standalone relays.** `smtp-relay`
+  (`OPENDKIM=host[:port]`) and `mailforward` (`GREYLIST=host[:port]`)
+  can wire ANY milter — e.g. the rspamd container — into their mail
+  path; the env names are historical (opendkim/milter-greylist era),
+  the mechanism is a plain milter endpoint.
+- **F21 — Fully wired by environment.** Every service connection is an
+  env knob validated at start-up: database (`DB_*` /
+  PostfixAdmin `DATABASE_*`), milter (`RSPAMD`), antispam backends
+  (`REDIS_HOST/PORT`, `CLAMAV_HOST/PORT`), identities and routing
+  (`DOMAIN`, `DOMAINS`, `HOSTNAME`, `HOSTROOT`, `MAILHOST`, `MAPPINGS`,
+  `LOCAL_DOMAINS`, `MYNETWORKS`, `RELAYHOST`, `PHP_FPM_HOST`) and the
+  authserv identity (`AUTHSERV_ID`). Legacy password hashes from an
+  imported database keep working via `DEFAULT_PASS_SCHEME`.
+- **F22 — Anti-spam behaviour is tunable.** The rspamd action
+  thresholds (`RSPAMD_GREYLIST_SCORE`, `RSPAMD_ADDHEADER_SCORE`,
+  `RSPAMD_REJECT_SCORE`), greylist timing (`RSPAMD_GREYLIST_TIMEOUT`,
+  `RSPAMD_GREYLIST_EXPIRE`), the trust perimeter
+  (`RSPAMD_LOCAL_ADDRS`, `RSPAMD_SIGN_NETWORKS`), the local-client
+  greylist opt-in (`RSPAMD_CHECK_LOCAL`), per-user Bayes
+  (`RSPAMD_BAYES_PER_USER`), the DKIM selector (`SELECTOR`), key
+  notification (`NOTIFY_EMAIL`, `NOTIFY_SMTP`) and log verbosity
+  (`RSPAMD_LOG_LEVEL`, `POSTFIX_TLS_LOGLEVEL`, `DOVECOT_DEBUG_AUTH`)
+  are all env knobs.
+- **F23 — PostfixAdmin deployment configuration.** Setup password,
+  per-admin limits and quota defaults (`ALIASES`, `MAILBOXES`,
+  `MAXQUOTA`, `DOMAIN_QUOTA_DEFAULT`), domain-creation defaults
+  (`DEFAULT_ALIASES` role accounts, `DEFAULT_ALIASES_ADDRESS/DOMAIN`)
+  and UI branding (`FOOTER_TEXT`, `FOOTER_LINK`, `WELCOME_TEXT`,
+  `SHOW_CUSTOM_*`) are env knobs rendered into the admin UI.
+  `VACATION_DOMAIN` is passed through to PostfixAdmin, but this stack
+  ships no vacation transport — leave it unset.
 
 ## Quality assurance
 

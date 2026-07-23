@@ -1,5 +1,24 @@
 # Changelog
 
+- 2026-07-23 **3.5.0**
+    - Added — every configuration knob is a tested feature
+        - The feature list now covers ALL configuration parameters
+          (new: generic milter hooks on the standalone relays, the
+          wiring knobs, the anti-spam tuning knobs, the PostfixAdmin
+          deployment/branding knobs), and every knob without an
+          effectiveness test got one: DKIM key notification really
+          arrives by mail, the relay/forward milter hooks really scan,
+          the cleartext-SMTP-auth opt-in really opens SASL, a legacy
+          password scheme really authenticates an imported database
+          row, per-user Bayes really creates per-recipient state
+          (while the global default does not), and the check-local
+          opt-in really greylists local clients.
+        - PostfixAdmin branding and default role aliases are pinned in
+          the UI; `VACATION_DOMAIN` is documented as a passthrough
+          without a vacation transport in this stack.
+        - README: the mailbox quota env is documented as a deliberate
+          on/off switch — the size is per-mailbox data in the admin UI.
+
 - 2026-07-22 **3.4.0**
     - Added — release-review hardening (migration safety)
         - The central migration guarantee is now proven end-to-end: an

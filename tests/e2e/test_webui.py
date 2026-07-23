@@ -115,6 +115,35 @@ def test_postfixadmin_mail_users_created(browser: Browser, provision_mail_accoun
     page.close()
 
 
+def test_postfixadmin_branding_rendered(browser: Browser,
+                                        provision_mail_accounts):
+    """The branding knobs (FOOTER_TEXT / FOOTER_LINK) are rendered into
+    the UI — the env→config passthrough is effective, not just stored."""
+    page = browser.new_page()
+    page.goto(f"{PA_URL}/login.php", timeout=20_000)
+    expect(page.get_by_text("E2E Footer Contract").first).to_be_visible(
+        timeout=10_000)
+    link = page.locator("a[href='https://example.test/footer']")
+    expect(link.first).to_be_attached(timeout=5_000)
+    page.close()
+
+
+def test_postfixadmin_default_aliases_created(browser: Browser,
+                                              provision_mail_accounts):
+    """Creating a domain provisions the DEFAULT_ALIASES standard
+    addresses (abuse/hostmaster/postmaster/webmaster) — required
+    role accounts exist without manual work."""
+    page = browser.new_page()
+    _pa_login(page)
+    page.goto(f"{PA_URL}/list-virtual.php?domain={DOMAIN}", timeout=15_000)
+    content = page.content()
+    for alias in ("abuse", "hostmaster", "postmaster", "webmaster"):
+        assert f"{alias}@{DOMAIN}" in content, (
+            f"default alias {alias}@{DOMAIN} was not created with the domain"
+        )
+    page.close()
+
+
 def test_postfixadmin_create_mailbox(browser: Browser, provision_mail_accounts):
     """Admin can add a further mailbox through the PostfixAdmin UI."""
     page = browser.new_page()

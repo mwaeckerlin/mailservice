@@ -26,6 +26,8 @@ leaves the machine.
 - **F11** `tests/e2e/test_webui.py` › test_postfixadmin_mail_users_created — the provisioned mailboxes are listed in PostfixAdmin.
 - **F11** `tests/e2e/test_webui.py` › test_postfixadmin_create_mailbox — creating a mailbox through the UI works end-to-end.
 - **F11** `tests/e2e/test_alias.py` › test_alias_delivers_to_target_mailbox — an alias created through the PostfixAdmin UI receives mail on the MX and it arrives in the target INBOX with the alias To intact (UI → DB → postfix virtual map → delivery).
+- **F23** `tests/e2e/test_webui.py` › test_postfixadmin_branding_rendered — FOOTER_TEXT/FOOTER_LINK really render into the admin UI.
+- **F23** `tests/e2e/test_webui.py` › test_postfixadmin_default_aliases_created — creating a domain provisions the DEFAULT_ALIASES role accounts (abuse/hostmaster/postmaster/webmaster).
 
 ## E2E — Backend/API (against the real running stack)
 
@@ -41,6 +43,8 @@ leaves the machine.
 - **F3** `tests/e2e/test_sieve.py` › test_sieve_cleartext_auth_refused_without_tls — cleartext ManageSieve auth is refused.
 - **F3** `tests/e2e/test_smtp.py` › test_smtp_plaintext_auth_refused_without_tls — SASL is not offered before STARTTLS.
 - **F3** `tests/e2e/test_tls.py` › test_cleartext_optin_imap_login / test_cleartext_optin_pop3_login — the deliberate `DOVECOT_ALLOW_CLEARTEXT=yes` softening works on the certless opt-in service (the default keeps refusing).
+- **F12** `tests/e2e/test_tls.py` › test_cleartext_auth_optin_smtp — the deliberate `POSTFIX_ALLOW_CLEARTEXT_AUTH=yes` softening opens SASL without TLS on the opt-in service (the secure default refuses).
+- **F21** `tests/e2e/test_imap.py` › test_default_pass_scheme_effective — a legacy database row with a bare PLAIN password authenticates when `DEFAULT_PASS_SCHEME` says so, and a wrong password still fails (the migration scenario the knob exists for).
 - **F4** `tests/e2e/test_smtp.py` › test_smtp_delivery_to_local_user / test_smtp_delivery_to_second_user — accepted submission is delivered.
 - **F5** `tests/e2e/test_greylisting.py` › test_authenticated_submission_not_greylisted — SASL-authenticated submission is never greylisted, whatever the content.
 - **F6** `tests/e2e/test_tls.py` › test_transport_security_header_plaintext / test_transport_security_header_tls — the header records `none` for a cleartext hop and the TLS version for an encrypted one.
@@ -49,12 +53,18 @@ leaves the machine.
 - **F7** `tests/e2e/test_virus_reject.py` › test_clamd_detects_eicar_directly / test_eicar_inline_body_rejected / test_eicar_attachment_rejected — EICAR is detected and rejected at SMTP time, inline and as attachment.
 - **F7** `tests/e2e/test_greylisting.py` › test_clean_unknown_sender_not_greylisted — clean first-time senders are never delayed (regression guard against postgrey-style blanket delays).
 - **F7** `tests/e2e/test_greylisting.py` › test_midscore_mail_greylisted_then_accepted — the defer/retry path: a deterministic mid-score mail draws a 4xx and is accepted and delivered on the retry of the same message.
+- **F22** `tests/e2e/test_greylisting.py` › test_check_local_greylists_local_clients — `RSPAMD_CHECK_LOCAL=true` removes the local-client greylist bypass (4xx then accept for a client inside local_addrs); the reverse (bypass) direction is technically not reproducible in the stack and documented in the test.
+- **F22** `tests/e2e/test_bayes_per_user.py` › test_bayes_per_user_separates_recipients — `RSPAMD_BAYES_PER_USER=true` really separates statistics by recipient: after training past min_learns for alice only, the same mail gets a Bayes verdict for alice and none for charlie.
+- **F13** `tests/e2e/test_dkim_notify.py` › test_dkim_key_notification_mail_delivered — `NOTIFY_EMAIL`/`NOTIFY_SMTP` really deliver the generated DKIM DNS records by mail (asserted in the fake-smtp store).
 - **F7** `tests/e2e/test_smtp.py` › test_smtp_unknown_local_recipient_rejected — mail to a nonexistent mailbox is rejected with a permanent error, never accepted into a void.
 - **F7** `tests/e2e/test_bayes_autolearn.py` › test_move_to_junk_advances_spam_learn_counter / test_move_out_of_junk_advances_ham_learn_counter — event-driven Bayes training fires on IMAP moves into/out of Junk.
 - **F8** `tests/e2e/test_delivery_mode.py` › test_forged_spam_headers_stripped_on_ingress — sender-forged X-Spam-* verdict headers are stripped before delivery (below-threshold case).
 - **F10** `tests/e2e/test_relay_family.py` › test_smtp_relay_banner_and_ehlo / test_smtp_relay_relays_to_external_mx — smtp-relay boots and REALLY relays to an external MX (asserted in the fake-smtp store).
 - **F10** `tests/e2e/test_relay_family.py` › test_smtp_relay_tls_starttls_handshake — smtp-relay-tls offers STARTTLS with the mounted cert and completes the handshake.
 - **F10** `tests/e2e/test_relay_family.py` › test_mailforward_banner_and_ehlo / test_mailforward_forwards_mapped_alias / test_mailforward_rejects_unmapped_recipient — mailforward forwards a mapped alias end-to-end and rejects unmapped recipients with a 5xx.
+- **F20** `tests/e2e/test_relay_family.py` › test_smtp_relay_milter_hook_effective — the `OPENDKIM` milter hook feeds relayed mail through the wired milter (rspamd headers on the delivered copy).
+- **F20** `tests/e2e/test_relay_family.py` › test_mailforward_milter_hook_effective — the `GREYLIST` milter hook does the same for forwards.
+- **F21** — the wiring knobs are exercised by the stacks themselves: every e2e service connects exclusively through them (`DB_*`, `RSPAMD`, `REDIS_HOST`, `CLAMAV_HOST`, `MAILHOST`, `MAPPINGS`, `MYNETWORKS`, `AUTHSERV_ID` — pinned by test_dkim_spf.py::test_authserv_id_in_authentication_results — and `PHP_FPM_HOST`, exercised with a non-default value by the schema-upgrade proxy); a wrong value would fail the respective suite.
 - **F12** `tests/e2e/test_smtp.py` › test_smtp_relay_rejected_for_external — the MX refuses to relay for unauthenticated senders.
 - **F12** `tests/e2e/test_smtp.py` › test_smtp_sasl_auth_accepted / test_smtp_sasl_wrong_password_rejected — authenticated submission good and bad case.
 - **F12** `tests/e2e/test_tls.py` › test_smtp_starttls_offered_and_negotiates / test_submission_auth_over_starttls — STARTTLS on the MX, authenticated submission over it.
@@ -102,8 +112,21 @@ above; the most important ones, by promise:
 - No open relay (F12): `test_smtp_relay_rejected_for_external`,
   `test_mailforward_rejects_unmapped_recipient`.
 - Hardened, shell-free images (F18): `tests/image-contract.sh`.
-- Environment validation (F18) is pinned per image in the submodule
-  suites (`postfix/tests/config-validation.sh`,
+- Environment validation (F18, F21, F22) is pinned per image in the
+  submodule suites (`postfix/tests/config-validation.sh`,
   `dovecot/tests/config-validation.sh`,
-  `rspamd/tests/config-validation.sh` — run via each submodule's
-  `npm test`).
+  `rspamd/tests/config-validation.sh`,
+  `smtp-relay/tests/config-validation.sh`,
+  `mailforward/tests/config-validation.sh` — run via each submodule's
+  `npm test`): every documented env knob has a reject case (malformed /
+  injection value refused with `invalid <VAR>`) and an accept case.
+- Tuning knobs whose values the e2e stack actively depends on are
+  thereby effectiveness-tested on every run:
+  `RSPAMD_GREYLIST_TIMEOUT`/`EXPIRE` (the greylist retry tests fit the
+  pytest budget only because of them), `RSPAMD_REJECT_SCORE` (GTUBE
+  rejects), `RSPAMD_LOCAL_ADDRS`/`RSPAMD_SIGN_NETWORKS` (the verify
+  paths only run because the runner counts as external yet gets
+  signed), `SETUP_PASSWORD`/`DATABASE_*`/`EMAILCHECK_RESOLVE_DOMAIN`
+  (provisioning), `MESSAGE_SIZE_LIMIT` and `SMTP_HARD_ERROR_LIMIT`
+  (validated; the 100-GiB default cannot be exercised with real mail —
+  documented technical limit).

@@ -2,7 +2,46 @@
 import imaplib
 import time
 import pytest
-from conftest import DOVECOT, IMAP_P, ALICE, ALICE_PW, BOB, BOB_PW, smtp_send, imap_starttls
+from conftest import (
+    DOVECOT, DOVECOT_PASSSCHEME, IMAP_P, ALICE, ALICE_PW, BOB, BOB_PW,
+    DOMAIN, smtp_send, imap_starttls,
+)
+
+
+def test_default_pass_scheme_effective():
+    """DEFAULT_PASS_SCHEME really controls how stored hashes are read —
+    the legacy-migration scenario: a database row carrying a bare
+    (schemeless) password in the configured scheme must authenticate.
+    The dedicated dovecot-passscheme service runs with
+    DEFAULT_PASS_SCHEME=PLAIN (its own instance — on a shared one the
+    scheme would break the crypt-hashed regular accounts); the row is
+    inserted the way an imported legacy database would carry it. The
+    wrong-password case proves the check is real."""
+    import pymysql
+    dave, dave_pw = f"dave@{DOMAIN}", "davepass12"
+    conn = pymysql.connect(host="postfixadmin-db", user="postfixadmin",
+                           password="testpass", database="postfixadmin")
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM mailbox WHERE username=%s", (dave,))
+            cur.execute(
+                "INSERT INTO mailbox (username, password, name, maildir,"
+                " quota, local_part, domain, created, modified, active)"
+                " VALUES (%s, %s, %s, %s, 0, %s, %s, NOW(), NOW(), 1)",
+                (dave, dave_pw, "Dave", f"{DOMAIN}/dave/", "dave", DOMAIN))
+        conn.commit()
+    finally:
+        conn.close()
+
+    with imaplib.IMAP4(DOVECOT_PASSSCHEME, IMAP_P) as c:
+        typ, _ = c.login(dave, dave_pw)
+        assert typ == "OK", (
+            "PLAIN-scheme legacy password did not authenticate — "
+            "DEFAULT_PASS_SCHEME is not effective"
+        )
+    with imaplib.IMAP4(DOVECOT_PASSSCHEME, IMAP_P) as c:
+        with pytest.raises(imaplib.IMAP4.error):
+            c.login(dave, "wrongpass99")
 
 
 def _wait_for_mail(conn: imaplib.IMAP4, subject: str,
