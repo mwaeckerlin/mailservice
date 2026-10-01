@@ -1,62 +1,37 @@
-# E2E UI-Tests (mailservice/tests/e2e/test_webui.py) — SnappyMail & PostfixAdmin Eigenheiten
+# Web UI Tests
 
-Hart erarbeitete, nicht offensichtliche Fakten für `mailservice/tests/e2e/test_webui.py`.
-SnappyMail-Version 2.38.2 (SPA, Knockout.js + Squire-Editor).
+Facts for `mailservice/tests/e2e/test_webui.py` that took long to find and are not obvious. SnappyMail 2.38.2, a single-page application on Knockout.js with the Squire editor.
 
 ## PostfixAdmin 4.x
-- Setup ist zweistufig: `form[name=authenticate]` mit `setup_password`, dann
-  `form[name=create_admin]`. Das `create_admin`-Formular braucht `setup_password`
-  ERNEUT (Re-Auth pro Request), sonst wird der Admin still nicht angelegt.
-- Buttons sind `<button type=submit>`, nicht `<input type=submit>` → Selektor `[type=submit]`.
-- `create-domain.php`/`create-mailbox.php` existieren nicht mehr → `edit.php?table=domain`
-  bzw. `edit.php?table=mailbox`. Felder: `value[domain]`, `value[local_part]`,
-  `value[name]`, `value[password]`, `value[password2]`.
 
-## SnappyMail Admin-Login
-- Login-Button: `button.buttonLogin` (kein `type=submit`).
-- Das `Login`-Feld hat `required` → `reportValidity()` blockiert sonst. Darum muss
-  `admin_login = "admin"` in der `application.ini` gesetzt UND das Login-Feld
-  ausgefüllt sein (`SM_ADMIN_USER`).
-- Domains-Tab: `a[href='#/domains']` (zuverlässiger als Text-Lookup).
-- «Add Domain»/«Save» sind `<a>`-Elemente, keine Buttons:
-  `a[data-bind*='createDomain']`, `footer a[data-bind*='createOrAddCommand']`.
+- Setup runs in two steps: `form[name=authenticate]` with `setup_password`, then `form[name=create_admin]`. The `create_admin` form needs `setup_password` AGAIN (authentication per request), or the admin is silently not created.
+- Buttons are `<button type=submit>`, not `<input type=submit>`, so the selector is `[type=submit]`.
+- `create-domain.php` and `create-mailbox.php` no longer exist: use `edit.php?table=domain` and `edit.php?table=mailbox`. Fields: `value[domain]`, `value[local_part]`, `value[name]`, `value[password]`, `value[password2]`.
 
-## SnappyMail Domain-Config — Host-Auto-Fill-Falle
-- Beim Fokussieren des LEEREN SMTP-Host-Felds spiegelt das `smtpHostFocus`-Binding
-  den IMAP-Host hinein (`imap`→`smtp`-Ersetzung). Ein einzelnes `.fill("postfix")`
-  rennt dann in eine KO-Race und ergibt `"dovecotpostfix"`.
-  → SMTP-Host ZWEIMAL füllen: erstes Füllen macht das Feld nicht-leer (Auto-Fill
-  feuert nur bei `!smtpHost()`), zweites setzt sauber.
-- Genauso: Domain-`Name` IMMER ZULETZT füllen, sonst füllt `imapHostFocus` den
-  IMAP-Host mit dem Domainnamen.
+## SnappyMail Admin Login
 
-## SnappyMail User-Compose
-- Nach Login öffnet SnappyMail ~1s später ein «Edit Identity»-Popup
-  (`dialog#V-PopupsIdentity`), wenn keine Identity gespeichert ist — es überlagert
-  alles. Behandeln: Name füllen + `button.buttonAddIdentity` → speichert dauerhaft.
-- Compose-Button: `a.buttonCompose` (zweimal vorhanden → `.first`).
-- To-Feld: `emailsTags`-Binding ersetzt das Original-`<input>` durch
-  `<ul class="emailaddresses"><input></ul>`. Adresse mit echtem `type()` + `Enter`
-  als Tag committen.
-- Body: Squire-Editor `div.squire-wysiwyg` INNERHALB `.textAreaParent` (zwei
-  Elemente, eindeutig: `.textAreaParent > .squire-wysiwyg`). Meldet sich oft als
-  «not visible» → per JS `el.focus()` + `page.keyboard.type()`.
-- Send-Button: `a[data-bind*='sendCommand']`.
-- **Sent-Ordner-Falle:** `sendCommand()` prüft `sentFolder()`; ist er leer (Konto
-  hat nur INBOX, kein Sent), öffnet SnappyMail `dialog#V-PopupsFolderSystem` STATT
-  zu senden — keinerlei SMTP-Verbindung. Lösung: im Picker Sent auf «Do not use»
-  (`select_option("__UNUSE__")`) setzen, schliessen, dann Send ERNEUT klicken.
-- Nach dem finalen Send NICHT auf `networkidle` warten (kann in der Lücke vor dem
-  Request schon idle sein → `page.close()` bricht den laufenden Send ab). Stattdessen
-  auf `dialog#V-PopupsCompose` state=hidden warten (= Send erfolgreich).
+- Login button: `button.buttonLogin` (no `type=submit`).
+- The `Login` field is `required`, so `reportValidity()` blocks otherwise. Therefore `admin_login = "admin"` is set in `application.ini` AND the login field is filled (`SM_ADMIN_USER`).
+- Domains tab: `a[href='#/domains']`, more reliable than a lookup by text.
+- «Add Domain» and «Save» are `<a>` elements, not buttons: `a[data-bind*='createDomain']`, `footer a[data-bind*='createOrAddCommand']`.
 
-## Infrastruktur
-- PHP-FPM-Basis (`mwaeckerlin/php-fpm`) hat `display_errors = on` → PHP-Deprecated-
-  Warnungen landen in HTTP-Bodies und zerstören JSON/HTML. In den Dockerfiles von
-  postfixadmin und rainloop per `sed` `display_errors`/`display_startup_errors`
-  abschalten + `clear_env = no` (sonst keine Env-Vars im FPM-Worker).
-- PostfixAdmin: NICHT `config.inc.php` ersetzen (verliert 4.x-Defaults wie `dkim`),
-  sondern eigene Overrides in `config.local.php`. Beide Dateien müssen unter
-  `/root/etc/postfixadmin/` liegen, weil `COPY --from=build /root/ /` Symlink-Ziele
-  ausserhalb `/root/` nicht mitkopiert.
-- Docker-Compose: `$` in YAML-Werten als `$$` escapen (bcrypt-Hashes `$2y$12$...`).
+## SnappyMail Domain Configuration
+
+- Focusing the EMPTY SMTP host field makes the `smtpHostFocus` binding copy the IMAP host into it (replacing `imap` by `smtp`). A single `.fill("postfix")` then races Knockout and yields `"dovecotpostfix"`. So the SMTP host is filled TWICE: the first fill makes the field non-empty (the auto-fill fires only on `!smtpHost()`), the second sets it cleanly.
+- Likewise the domain `Name` is ALWAYS filled LAST, or `imapHostFocus` fills the IMAP host with the domain name.
+
+## SnappyMail Compose
+
+- About one second after login, SnappyMail opens an «Edit Identity» popup (`dialog#V-PopupsIdentity`) when no identity is saved, and it covers everything. Handle it: fill the name and click `button.buttonAddIdentity`, which saves it for good.
+- Compose button: `a.buttonCompose` (present twice, so `.first`).
+- To field: the `emailsTags` binding replaces the original `<input>` with `<ul class="emailaddresses"><input></ul>`. The address is committed as a tag with a real `type()` followed by `Enter`.
+- Body: the Squire editor `div.squire-wysiwyg` INSIDE `.textAreaParent` (two elements, unique as `.textAreaParent > .squire-wysiwyg`). It often reports «not visible», so focus it with `el.focus()` in JavaScript and type with `page.keyboard.type()`.
+- Send button: `a[data-bind*='sendCommand']`.
+- **Sent folder:** `sendCommand()` checks `sentFolder()`; when it is empty (the account has only INBOX and no Sent), SnappyMail opens `dialog#V-PopupsFolderSystem` INSTEAD of sending, with no SMTP connection at all. Set Sent to «Do not use» in the picker (`select_option("__UNUSE__")`), close it, then click Send AGAIN.
+- After the final Send, do NOT wait for `networkidle`: the page can be idle in the gap before the request, and `page.close()` then aborts the running send. Wait for `dialog#V-PopupsCompose` to reach state hidden, which means the send succeeded.
+
+## Infrastructure
+
+- The PHP-FPM base (`mwaeckerlin/php-fpm`) has `display_errors = on`, so PHP deprecation warnings land in HTTP bodies and break JSON and HTML. The Dockerfiles of postfixadmin and rainloop switch `display_errors` and `display_startup_errors` off with `sed`, and set `clear_env = no` (or the FPM worker sees no environment variables).
+- PostfixAdmin: do NOT replace `config.inc.php` (it loses 4.x defaults such as `dkim`); put the overrides into `config.local.php`. Both files lie under `/root/etc/postfixadmin/`, because `COPY --from=build /root/ /` does not copy symlink targets outside `/root/`.
+- Docker Compose: a `$` in a YAML value is escaped as `$$` (bcrypt hashes `$2y$12$...`).
