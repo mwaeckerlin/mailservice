@@ -1,6 +1,6 @@
 {
   "name": "@mwaeckerlin/mailservice",
-  "version": "3.5.0",
+  "version": "3.5.1",
   "scripts": {
     "build": "docker compose build",
     "start": "docker compose up --build --force-recreate --remove-orphans",
@@ -15,6 +15,8 @@
     "test:queue": "bash tests/queue-persistence.sh",
     "test:image": "docker compose -f docker-compose.yml -f docker-compose.local.yml build --quiet && bash tests/image-contract.sh mwaeckerlin/rspamd mwaeckerlin/redis mwaeckerlin/clamav mwaeckerlin/postfix mwaeckerlin/dovecot mwaeckerlin/smtp-relay mwaeckerlin/smtp-relay-tls mwaeckerlin/mailforward mwaeckerlin/postfixadmin mwaeckerlin/postfixadmin-proxy mwaeckerlin/snappymail:php-fpm mwaeckerlin/snappymail:nginx",
     "test:e2e": "bash tests/run-e2e.sh",
+    "test:v1": "bash tests/run-v1.sh",
+    "test:v1:stop": "docker compose -f tests/v1/docker-compose.yml down -v --remove-orphans",
     "test:e2e:stop": "docker compose -f tests/e2e/docker-compose.yml down -v --remove-orphans",
     "test:ui": "bash tests/run-ui.sh",
     "test:manual": "bash tests/run-manual.sh",

@@ -1,0 +1,228 @@
+# End-to-end stack of the VERSION 1 line — the one running in production.
+#
+# Every mailservice image here is PULLED by the tag the production
+# compose pins (`:1`, and the two rainloop variants), never built from
+# this working tree: the subject of this suite is the published image,
+# so a build would measure something nobody deploys. postgrey is pinned
+# by digest because its repository is archived and can never produce a
+# `:1` tag.
+#
+# What the suite proves: a mailbox logs in, mail from outside reaches
+# that mailbox, an authenticated client sends mail out to a foreign MX,
+# and the webmail shows the delivered mail in the browser.
+#
+# The foreign MX is mwaeckerlin/fake-smtp inside this stack, reachable
+# under extern.local through the stack's own resolver — no mail ever
+# leaves the machine.
+
+services:
+
+  dns:
+    build: ./dns
+    networks:
+      dns-net:
+        ipv4_address: 10.100.0.2
+    healthcheck:
+      test: ["CMD-SHELL", "nc -w1 127.0.0.1 53 </dev/null"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+      start_period: 3s
+
+  # A throw-away certificate where postfix and dovecot of the 1 line look
+  # for it. Both enable TLS only when it is present, and the 1-line
+  # postfix additionally offers SASL only over TLS
+  # (smtpd_tls_auth_only=yes), so without this the submission test could
+  # not authenticate at all.
+  certs-init:
+    image: alpine:3.23
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - "i=0; while ! apk add --no-cache openssl >/dev/null 2>&1; do i=$$((i+1)); [ $$i -ge 15 ] && echo 'apk add openssl failed after 15 tries' && exit 1; sleep 3; done; mkdir -p /etc/letsencrypt/live/test.local && openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -keyout /etc/letsencrypt/live/test.local/privkey.pem -out /etc/letsencrypt/live/test.local/fullchain.pem -subj '/CN=mail.test.local' -addext 'subjectAltName=DNS:mail.test.local,DNS:test.local,DNS:postfix,DNS:dovecot' && chmod 644 /etc/letsencrypt/live/test.local/*"
+    volumes:
+      - letsencrypt:/etc/letsencrypt
+
+  # The foreign MX. dns/dnsmasq.conf points the MX of extern.local at
+  # this fixed address, so the 1-line postfix performs a real MX lookup
+  # and a real SMTP delivery to it.
+  fake-smtp:
+    image: mwaeckerlin/fake-smtp
+    volumes:
+      - fake-mails:/mails
+    networks:
+      mail:
+      dns-net:
+        ipv4_address: 10.100.0.99
+
+  postfixadmin-db:
+    image: mariadb:11
+    environment:
+      MYSQL_DATABASE:             postfixadmin
+      MYSQL_USER:                 postfixadmin
+      MYSQL_PASSWORD:             testpass
+      MYSQL_RANDOM_ROOT_PASSWORD: "yes"
+    healthcheck:
+      test: ["CMD", "mariadb-admin", "ping", "-h", "localhost", "-u", "postfixadmin", "-ptestpass"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks: [ui-net, db-net]
+
+  postfixadmin:
+    image: mwaeckerlin/postfixadmin:1
+    environment:
+      DATABASE_TYPE:             mysqli
+      DATABASE_HOST:             postfixadmin-db
+      DATABASE_NAME:             postfixadmin
+      DATABASE_USER:             postfixadmin
+      DATABASE_PASSWORD:         testpass
+      SETUP_PASSWORD:            "$$2y$$12$$MHkqblkyo7WD0q6D3I7y9epJiZO9MqyN4AIYxmtn1NuyikRIvpDUy"
+      EMAILCHECK_RESOLVE_DOMAIN: "NO"
+      ALIASES:                   "10"
+      MAILBOXES:                 "10"
+      MAXQUOTA:                  "10"
+    # the stack's own resolver, so the domain check resolves test.local
+    dns: ["10.100.0.2"]
+    depends_on:
+      postfixadmin-db: { condition: service_healthy }
+      dns:             { condition: service_healthy }
+    networks: [ui-net, dns-net]
+
+  postfixadmin-proxy:
+    image: mwaeckerlin/postfixadmin-proxy:1
+    depends_on: [postfixadmin]
+    networks: [ui-net]
+
+  # Greylisting as production runs it. The repository is archived, so
+  # this digest is the only way to name the image Marc has deployed —
+  # the one exception to the no-digest rule, and the reason is here.
+  postgrey:
+    image: mwaeckerlin/postgrey@sha256:db6e9898e5c5705821e776def6f601bb7b72fd00fa9cb887bbabb8bf6e59833a
+    volumes:
+      - greylist:/data
+    networks: [greylisting]
+
+  dovecot:
+    image: mwaeckerlin/dovecot:1
+    environment:
+      DB_HOST:     postfixadmin-db
+      DB_USER:     postfixadmin
+      DB_PASSWORD: testpass
+      DB_NAME:     postfixadmin
+      DOMAIN:      test.local
+    volumes:
+      - maildata:/var/mail/domains
+      - letsencrypt:/etc/letsencrypt:ro
+    depends_on:
+      postfixadmin-db: { condition: service_healthy }
+      certs-init:      { condition: service_completed_successfully }
+    networks: [mail, db-net]
+
+  postfix:
+    image: mwaeckerlin/postfix:1
+    hostname: mail.test.local
+    environment:
+      GREYLIST:      postgrey
+      DOMAIN:        test.local
+      HOSTNAME:      mail.test.local
+      HOSTROOT:      test.local
+      DB_HOST:       postfixadmin-db
+      DB_USER:       postfixadmin
+      DB_PASSWORD:   testpass
+      DB_NAME:       postfixadmin
+      # the isolated resolver cannot answer the blocklist zones; every
+      # lookup would stall the SMTP dialogue until its timeout
+      DISABLE_DNSBL: "yes"
+    dns: ["10.100.0.2"]
+    volumes:
+      - letsencrypt:/etc/letsencrypt:ro
+    depends_on:
+      postfixadmin-db: { condition: service_healthy }
+      dovecot:         { condition: service_started }
+      postgrey:        { condition: service_started }
+      dns:             { condition: service_healthy }
+      certs-init:      { condition: service_completed_successfully }
+    networks: [mail, db-net, greylisting, dns-net]
+
+  # Seeds the webmail's own configuration, the way the production
+  # deployment does it, which mounts the configs directory. The domain
+  # file is what lets a mailbox log in at all; writing it here keeps the
+  # suite independent of the admin interface, whose markup differs
+  # between webmail releases.
+  snappymail-init:
+    build: ./snappymail-init
+    environment:
+      SNAPPYMAIL_DATA: /data
+      MAIL_DOMAIN:     test.local
+      DOVECOT_HOST:    dovecot
+      IMAP_PORT:       "143"
+      POSTFIX_HOST:    postfix
+      SMTP_PORT:       "25"
+    volumes:
+      - snappymail-data:/data
+
+  snappymail:
+    image: mwaeckerlin/rainloop:php-fpm-1
+    depends_on:
+      snappymail-init: { condition: service_completed_successfully }
+    volumes:
+      - snappymail-data:/app/data
+    networks: [ui-net, mail]
+
+  snappymail-proxy:
+    image: mwaeckerlin/rainloop:nginx-1
+    environment:
+      PHP_FPM_HOST: snappymail
+    depends_on: [snappymail]
+    networks: [ui-net]
+
+  test-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.playwright
+    depends_on:
+      postfix:            { condition: service_started }
+      dovecot:            { condition: service_started }
+      postfixadmin-proxy: { condition: service_started }
+      snappymail-proxy:   { condition: service_started }
+      fake-smtp:          { condition: service_started }
+    environment:
+      POSTFIX_HOST:      postfix
+      DOVECOT_HOST:      dovecot
+      SMTP_PORT:         "25"
+      IMAP_PORT:         "143"
+      MAIL_DOMAIN:       test.local
+      ALICE_USER:        alice@test.local
+      ALICE_PASS:        alicepass12
+      BOB_USER:          bob@test.local
+      BOB_PASS:          bobpass12
+      POSTFIXADMIN_URL:  "http://postfixadmin-proxy:8080"
+      SNAPPYMAIL_URL:    "http://snappymail-proxy:8080"
+      ADMIN_USER:        admin@test.local
+      ADMIN_PASS:        Admin123pass
+      SETUP_PASS:        test123
+      SM_ADMIN_USER:     "admin"
+      SM_ADMIN_PASS:     "12345"
+      EXTERNAL_RCPT:     sink@extern.local
+      FAKE_MAILS_DIR:    /fake-mails
+    volumes:
+      - fake-mails:/fake-mails:ro
+    networks: [mail, ui-net]
+    command: ["pytest", "-v", "--tb=short"]
+
+networks:
+  mail:
+  db-net:
+  ui-net:
+  greylisting:
+  dns-net:
+    ipam:
+      config:
+        - subnet: 10.100.0.0/24
+
+volumes:
+  letsencrypt:
+  maildata:
+  greylist:
+  fake-mails:
+  snappymail-data:

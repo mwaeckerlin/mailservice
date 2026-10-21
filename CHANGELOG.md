@@ -1,589 +1,216 @@
 # Changelog
 
+- 2026-10-22 **3.5.1**
+    - In the mail images below, everything an operator sets is an environment variable with a default; none of them needs a mounted or edited configuration file any more
+        - dovecot: database port and TLS (`DB_PORT`, `DB_SSL=no` for MariaDB 10, which before needed a change in the init source), connection limits per user and address
+        - postfix: dovecot under another name or port, the milter fail action, the DNS blocklists, the database port, and a relay host with a port that now works
+        - smtp-relay, smtp-relay-tls, mailforward: relay networks and an upstream relay host; mailforward also its DNS blocklists
+        - rspamd: controller networks and password, milter worker count, Bayes learn threshold, largest scanned message
+        - PostfixAdmin: the folders of a new mailbox with their IMAP server, the SMTP server and sender of its mails, the database port
+        - SnappyMail: admin password and the IMAP and SMTP server of a mail domain, written by its init container
+    - Unset, every new variable keeps today's behaviour; the suite of each of these images reads the effective configuration with and without it
+
 - 2026-07-23 **3.5.0**
-    - Added — every configuration knob is a tested feature
-        - The feature list now covers ALL configuration parameters
-          (new: generic milter hooks on the standalone relays, the
-          wiring knobs, the anti-spam tuning knobs, the PostfixAdmin
-          deployment/branding knobs), and every knob without an
-          effectiveness test got one: DKIM key notification really
-          arrives by mail, the relay/forward milter hooks really scan,
-          the cleartext-SMTP-auth opt-in really opens SASL, a legacy
-          password scheme really authenticates an imported database
-          row, per-user Bayes really creates per-recipient state
-          (while the global default does not), and the check-local
-          opt-in really greylists local clients.
-        - PostfixAdmin branding and default role aliases are pinned in
-          the UI; `VACATION_DOMAIN` is documented as a passthrough
-          without a vacation transport in this stack.
-        - README: the mailbox quota env is documented as a deliberate
-          on/off switch — the size is per-mailbox data in the admin UI.
+    - Added — every configuration knob is a tested feature
+        - The feature list now covers ALL configuration parameters (new: generic milter hooks on the standalone relays, the wiring knobs, the anti-spam tuning knobs, the PostfixAdmin deployment/branding knobs), and every knob without an effectiveness test got one: DKIM key notification really arrives by mail, the relay/forward milter hooks really scan, the cleartext-SMTP-auth opt-in really opens SASL, a legacy password scheme really authenticates an imported database row, per-user Bayes really creates per-recipient state (while the global default does not), and the check-local opt-in really greylists local clients.
+        - PostfixAdmin branding and default role aliases are pinned in the UI; `VACATION_DOMAIN` is documented as a passthrough without a vacation transport in this stack.
+        - README: the mailbox quota env is documented as a deliberate on/off switch — the size is per-mailbox data in the admin UI.
 
 - 2026-07-22 **3.4.0**
-    - Added — release-review hardening (migration safety)
-        - The central migration guarantee is now proven end-to-end: an
-          accepted-but-undelivered mail survives the destruction and
-          recreation of its container and is delivered afterwards
-          (queue-persistence test, part of `npm test`).
-        - A new README section «Upgrading this stack — no mail is
-          lost» walks through the upgrade path and names the automated
-          test behind every guarantee.
-        - OpenPGP with passphrase-PROTECTED keys is exercised
-          end-to-end (sign and decrypt hand the passphrase to the
-          php-gnupg backend) — the exact concern the upstream webmail
-          disabled that backend over.
-    - Added — test governance
-        - Features are numbered (`F1`–`F19` in FEATURES.md) and a new
-          TESTS.md registers every test with the features it covers;
-          an automated coverage guard fails the suite when a feature
-          loses its tests, a number is duplicated, or a test
-          references an unknown feature.
-    - Tests — coverage gaps closed after a functional review
-        - The opt-in spam delivery modes `mark` and `folder` are now
-          exercised end-to-end over the real delivery interface:
-          flagged mail reaches INBOX under `mark`, the Junk folder
-          under `folder`, and clean mail always stays in INBOX.
-        - The ingress guard against sender-forged spam verdict
-          headers is now pinned: incoming copies are stripped before
-          delivery, so a foreign filter's leftover flag can never
-          silently divert legitimate mail to Junk under `folder` mode.
-        - Alias delivery is covered end-to-end: an alias created in
-          PostfixAdmin receives mail on the MX and arrives in the
-          target mailbox.
-        - Also pinned now: POP3S login on port 995, a real relay
-          through `smtp-relay` to an external MX, and the
-          effectiveness of the Sieve script-size limit (an oversized
-          upload is refused, not just the config value validated).
-        - The greylist defer/retry path itself is now exercised: a
-          deterministic mid-score mail draws a 4xx on the first
-          attempt and is accepted and delivered on the retry.
-        - The deliberate cleartext opt-in
-          (`DOVECOT_ALLOW_CLEARTEXT=yes` on a certless stack) is
-          pinned: plain IMAP and POP3 logins then succeed, while the
-          secure default keeps refusing them.
-        - The database schema upgrade after an image update is now
-          tested against a real PostfixAdmin 3.2 schema (generated by
-          the old release itself): opening setup.php migrates the
-          schema and the previously failing admin pages work.
-        - Webmail OpenPGP is exercised end-to-end through the real UI:
-          key generation, key import into the server-side GnuPG store,
-          then a signed + encrypted mail composed in one account,
-          ciphertext-only on the wire, decrypted and
-          signature-verified in the recipient's webmail.
-    - Fixed — server-side OpenPGP in the webmail
-        - The new end-to-end test uncovered that server-side OpenPGP
-          was silently dead in the headless SnappyMail image: the
-          preferred CLI backend needs a shell the hardened image
-          deliberately does not ship, while the bundled php-gnupg
-          extension sat unused. The image now prefers the extension
-          (see the SnappyMail image changelog for details).
-        - The end-to-end runner now starts from a clean slate even
-          after an interrupted previous run (a leftover warm stack
-          would carry greylist/Bayes/account state into the next run),
-          and `npm run test:e2e:stop` tears the test stack down
-          manually.
-    - Added — manual two-domain playground (`tests/manual/`)
-        - Two complete, independent mail deployments (domains `alice`
-          and `bob`) deliver mail to each other over real
-          server-to-server SMTP on one Linux machine, with a local
-          pseudo-CA issuing their TLS certificates. The walk-through
-          covers account setup, OpenPGP between the two users (plain,
-          signed, signed+encrypted), spam and virus rejection with
-          real bounces, aliases, Sieve filters and a native mail
-          client trusting the pseudo-CA. `npm run manual:up` /
-          `manual:down` / `manual:down:wipe`.
+    - Added — release-review hardening (migration safety)
+        - The central migration guarantee is now proven end-to-end: an accepted-but-undelivered mail survives the destruction and recreation of its container and is delivered afterwards (queue-persistence test, part of `npm test`).
+        - A new README section «Upgrading this stack — no mail is lost» walks through the upgrade path and names the automated test behind every guarantee.
+        - OpenPGP with passphrase-PROTECTED keys is exercised end-to-end (sign and decrypt hand the passphrase to the php-gnupg backend) — the exact concern the upstream webmail disabled that backend over.
+    - Added — test governance
+        - Features are numbered (`F1`–`F19` in FEATURES.md) and a new TESTS.md registers every test with the features it covers; an automated coverage guard fails the suite when a feature loses its tests, a number is duplicated, or a test references an unknown feature.
+    - Tests — coverage gaps closed after a functional review
+        - The opt-in spam delivery modes `mark` and `folder` are now exercised end-to-end over the real delivery interface: flagged mail reaches INBOX under `mark`, the Junk folder under `folder`, and clean mail always stays in INBOX.
+        - The ingress guard against sender-forged spam verdict headers is now pinned: incoming copies are stripped before delivery, so a foreign filter's leftover flag can never silently divert legitimate mail to Junk under `folder` mode.
+        - Alias delivery is covered end-to-end: an alias created in PostfixAdmin receives mail on the MX and arrives in the target mailbox.
+        - Also pinned now: POP3S login on port 995, a real relay through `smtp-relay` to an external MX, and the effectiveness of the Sieve script-size limit (an oversized upload is refused, not just the config value validated).
+        - The greylist defer/retry path itself is now exercised: a deterministic mid-score mail draws a 4xx on the first attempt and is accepted and delivered on the retry.
+        - The deliberate cleartext opt-in (`DOVECOT_ALLOW_CLEARTEXT=yes` on a certless stack) is pinned: plain IMAP and POP3 logins then succeed, while the secure default keeps refusing them.
+        - The database schema upgrade after an image update is now tested against a real PostfixAdmin 3.2 schema (generated by the old release itself): opening setup.php migrates the schema and the previously failing admin pages work.
+        - Webmail OpenPGP is exercised end-to-end through the real UI: key generation, key import into the server-side GnuPG store, then a signed + encrypted mail composed in one account, ciphertext-only on the wire, decrypted and signature-verified in the recipient's webmail.
+    - Fixed — server-side OpenPGP in the webmail
+        - The new end-to-end test uncovered that server-side OpenPGP was silently dead in the headless SnappyMail image: the preferred CLI backend needs a shell the hardened image deliberately does not ship, while the bundled php-gnupg extension sat unused. The image now prefers the extension (see the SnappyMail image changelog for details).
+        - The end-to-end runner now starts from a clean slate even after an interrupted previous run (a leftover warm stack would carry greylist/Bayes/account state into the next run), and `npm run test:e2e:stop` tears the test stack down manually.
+    - Added — manual two-domain playground (`tests/manual/`)
+        - Two complete, independent mail deployments (domains `alice` and `bob`) deliver mail to each other over real server-to-server SMTP on one Linux machine, with a local pseudo-CA issuing their TLS certificates. The walk-through covers account setup, OpenPGP between the two users (plain, signed, signed+encrypted), spam and virus rejection with real bounces, aliases, Sieve filters and a native mail client trusting the pseudo-CA. `npm run manual:up` / `manual:down` / `manual:down:wipe`.
     - Documentation
-        - The «How each component upholds this» table now describes
-          the actual v3 behaviour: DKIM/DMARC enforcement depends on
-          the configured mode, and SPF never rejects on its own — its
-          verdict feeds DMARC alignment and the spam score.
+        - The «How each component upholds this» table now describes the actual v3 behaviour: DKIM/DMARC enforcement depends on the configured mode, and SPF never rejects on its own — its verdict feeds DMARC alignment and the spam score.
 
 - 2026-07-20 **3.3.0**
-    - Added — dedicated submission services (587 / 465)
-        - Submission is now separated from the port-25 MX. Ports 587
-          (STARTTLS) and 465 (implicit TLS) enforce TLS **and** SASL
-          authentication and drop the MX/DNSBL restrictions for your own
-          authenticated users; port 25 stays anonymous with opportunistic
-          TLS for server-to-server mail. Both submission ports require a
-          certificate.
-        - **Migration:** the production compose now maps `587:587` and
-          `465:465` instead of the old `587:25`. Point your mail clients'
-          submission port at 587 (STARTTLS) or 465 (implicit TLS); nothing
-          changes for inbound MX mail on 25. See README «Ports and roles».
-    - Added — transport-encryption transparency
-        - Postfix records the receiving hop's TLS in its `Received` header
-          and hands the TLS version/cipher to rspamd, which stamps a
-          machine-readable `X-Transport-Security` header (`TLSv1.3
-          (cipher …)` or `none`) on every incoming mail — the trustworthy
-          last-hop measurement. A forged incoming copy of the header is
-          stripped first. A bundled SnappyMail plugin reads it and marks
-          the message red (cleartext) or orange (obsolete TLS) in the
-          webmail, so operators can warn the peers that still deliver
-          without modern TLS. Adding headers never breaks a DKIM signature.
-    - Changed — transport encryption policy
-        - Opportunistic TLS (the default on port 25) now keeps every
-          protocol except the broken SSLv2/SSLv3, so a legacy peer's mail
-          is still encrypted rather than forced back to plaintext by a hard
-          floor (RFC 7435; delivery before filtering). The TLS 1.2 floor
-          applies where TLS is **mandatory** (submission, and the opt-in
-          reject mode).
-        - New opt-in `SMTPD_TLS_REQUIRED=yes` on postfix: the port-25 MX
-          then rejects any connection that will not negotiate TLS 1.2+
-          (deliberately RFC-3207-non-compliant for a public MX; fit for
-          internal / closed / B2B ingresses).
-    - Changed — hardening
-        - Every image of the postfix family and dovecot now
-          whitelist-validates its environment before rendering it into a
-          config file (dovecot joins the family here; postfix/rspamd/relay
-          gained it in 3.2.0).
-        - PostfixAdmin ships no default database password anymore — an
-          unset `DATABASE_PASSWORD` fails loudly and early instead of
-          coming up on a publicly known credential.
-        - rspamd `AUTHSERV_ID` is wired into the Authentication-Results
-          authserv-id; the dead `NAMESERVERS` knob (an OpenDKIM-era
-          leftover consumed by nothing) is removed from the composes.
-    - Added — configurable, documented limits
-        - `SIEVE_MAX_SCRIPT_SIZE` (dovecot, default 500M) is now an env
-          knob — lowerable on a small box to shrink the authenticated
-          ManageSieve DoS surface.
-        - `DOVECOT_QUOTA=yes` (default off) enables a per-mailbox quota
-          read from the PostfixAdmin `mailbox.quota` column; over-quota
-          delivery returns a temporary failure (the sender retries),
-          never a silent drop. Pinned by the `dovecot-quota` e2e service.
+    - Added — dedicated submission services (587 / 465)
+        - Submission is now separated from the port-25 MX. Ports 587 (STARTTLS) and 465 (implicit TLS) enforce TLS **and** SASL authentication and drop the MX/DNSBL restrictions for your own authenticated users; port 25 stays anonymous with opportunistic TLS for server-to-server mail. Both submission ports require a certificate.
+        - **Migration:** the production compose now maps `587:587` and `465:465` instead of the old `587:25`. Point your mail clients' submission port at 587 (STARTTLS) or 465 (implicit TLS); nothing changes for inbound MX mail on 25. See README «Ports and roles».
+    - Added — transport-encryption transparency
+        - Postfix records the receiving hop's TLS in its `Received` header and hands the TLS version/cipher to rspamd, which stamps a machine-readable `X-Transport-Security` header (`TLSv1.3 (cipher …)` or `none`) on every incoming mail — the trustworthy last-hop measurement. A forged incoming copy of the header is stripped first. A bundled SnappyMail plugin reads it and marks the message red (cleartext) or orange (obsolete TLS) in the webmail, so operators can warn the peers that still deliver without modern TLS. Adding headers never breaks a DKIM signature.
+    - Changed — transport encryption policy
+        - Opportunistic TLS (the default on port 25) now keeps every protocol except the broken SSLv2/SSLv3, so a legacy peer's mail is still encrypted rather than forced back to plaintext by a hard floor (RFC 7435; delivery before filtering). The TLS 1.2 floor applies where TLS is **mandatory** (submission, and the opt-in reject mode).
+        - New opt-in `SMTPD_TLS_REQUIRED=yes` on postfix: the port-25 MX then rejects any connection that will not negotiate TLS 1.2+ (deliberately RFC-3207-non-compliant for a public MX; fit for internal / closed / B2B ingresses).
+    - Changed — hardening
+        - Every image of the postfix family and dovecot now whitelist-validates its environment before rendering it into a config file (dovecot joins the family here; postfix/rspamd/relay gained it in 3.2.0).
+        - PostfixAdmin ships no default database password anymore — an unset `DATABASE_PASSWORD` fails loudly and early instead of coming up on a publicly known credential.
+        - rspamd `AUTHSERV_ID` is wired into the Authentication-Results authserv-id; the dead `NAMESERVERS` knob (an OpenDKIM-era leftover consumed by nothing) is removed from the composes.
+    - Added — configurable, documented limits
+        - `SIEVE_MAX_SCRIPT_SIZE` (dovecot, default 500M) is now an env knob — lowerable on a small box to shrink the authenticated ManageSieve DoS surface.
+        - `DOVECOT_QUOTA=yes` (default off) enables a per-mailbox quota read from the PostfixAdmin `mailbox.quota` column; over-quota delivery returns a temporary failure (the sender retries), never a silent drop. Pinned by the `dovecot-quota` e2e service.
     - Removed
-        - The `postgrey` submodule (deprecated: greylisting is rspamd's job
-          since 3.0.0; the standalone image is archived) and the retired
-          `opendkim/` and `opendmarc/` directories.
+        - The `postgrey` submodule (deprecated: greylisting is rspamd's job since 3.0.0; the standalone image is archived) and the retired `opendkim/` and `opendmarc/` directories.
     - Documentation
-        - README «Upgrading from 3.1»: the account-database volume moved
-          from `/usr/lib/mysql` to `/var/lib/mysql` in 3.2.0 — an existing
-          deployment carries junk on the old path, so a one-time
-          `docker volume rm` of the old `postfixadmin-db` volume is needed
-          (no data loss: the volume never held the database — that was the
-          bug). The CHANGELOG is back in the project list format.
+        - README «Upgrading from 3.1»: the account-database volume moved from `/usr/lib/mysql` to `/var/lib/mysql` in 3.2.0 — an existing deployment carries junk on the old path, so a one-time `docker volume rm` of the old `postfixadmin-db` volume is needed (no data loss: the volume never held the database — that was the bug). The CHANGELOG is back in the project list format.
 
 - 2026-07-19 **3.2.0**
-    - Fixed — database persistence and engine
-        - The production compose mounted the account database volume at
-          `/usr/lib/mysql` instead of `/var/lib/mysql` — the volume persisted
-          **nothing**: every container recreate silently dropped all domains,
-          mailboxes and password hashes. The volume now targets the real data
-          directory, pinned by a new compose-contract check.
-        - The database service now runs `mariadb:11` (the stack requirement —
-          Dovecot 2.4 needs the TLS the 11.x server offers, see README
-          «Database version») instead of a rolling `mysql` image whose 8.4
-          release additionally removed the `--default-authentication-plugin`
-          switch the compose passed (start-up failure on next pull). Also
-          pinned by the compose contract.
-    - Changed — security hardening across the stack
-        - Without a TLS certificate the postfix image no longer offers SASL
-          authentication at all (stack invariant: passwords never travel
-          unencrypted; same behaviour as dovecot). Deliberately TLS-less
-          deployments can opt in via `POSTFIX_ALLOW_CLEARTEXT_AUTH=yes`.
-          Pinned by a new e2e scenario (`postfix-nocert`) with valid
-          credentials.
-        - Every image of the postfix family (`postfix`, `smtp-relay`,
-          `smtp-relay-tls`, `mailforward`) and rspamd now whitelist-validates
-          every environment value before rendering it into configuration files
-          — a malformed value (embedded newline: config injection) refuses to
-          start with a clear `invalid <VAR>` error. Each submodule carries its
-          own config-validation test suite.
-        - The SnappyMail **nginx** image now verifies the release tarball's
-          OpenPGP signature against the pinned key exactly like the php-fpm
-          image — it serves all JavaScript the browser executes and previously
-          downloaded without any check.
-        - The relay family's TLS setup is modernised: deprecated
-          `smtpd_use_tls`/`smtpd_tls_eecdh_grade` knobs and the frozen 2015-era
-          cipher list are gone, the protocol floor is TLS 1.2 (opportunistic —
-          a legacy sender without TLS 1.2 falls back to plaintext and the mail
-          still arrives).
-        - The PostfixAdmin admin UI (plain HTTP) is published on loopback only;
-          remote access goes through a TLS reverse proxy (README «Trade-off —
-          admin UI without TLS»). Pinned by the compose contract.
-    - Fixed — test harness
-        - `tests/run-e2e.sh` forwards pytest arguments again: `docker compose
-          run` replaces the service command entirely, so `-k <test>` used to be
-          exec'd as the entrypoint instead of selecting tests.
+    - Fixed — database persistence and engine
+        - The production compose mounted the account database volume at `/usr/lib/mysql` instead of `/var/lib/mysql` — the volume persisted **nothing**: every container recreate silently dropped all domains, mailboxes and password hashes. The volume now targets the real data directory, pinned by a new compose-contract check.
+        - The database service now runs `mariadb:11` (the stack requirement — Dovecot 2.4 needs the TLS the 11.x server offers, see README «Database version») instead of a rolling `mysql` image whose 8.4 release additionally removed the `--default-authentication-plugin` switch the compose passed (start-up failure on next pull). Also pinned by the compose contract.
+    - Changed — security hardening across the stack
+        - Without a TLS certificate the postfix image no longer offers SASL authentication at all (stack invariant: passwords never travel unencrypted; same behaviour as dovecot). Deliberately TLS-less deployments can opt in via `POSTFIX_ALLOW_CLEARTEXT_AUTH=yes`. Pinned by a new e2e scenario (`postfix-nocert`) with valid credentials.
+        - Every image of the postfix family (`postfix`, `smtp-relay`, `smtp-relay-tls`, `mailforward`) and rspamd now whitelist-validates every environment value before rendering it into configuration files&nbsp;— a malformed value (embedded newline: config injection) refuses to start with a clear `invalid <VAR>` error. Each submodule carries its own config-validation test suite.
+        - The SnappyMail **nginx** image now verifies the release tarball's OpenPGP signature against the pinned key exactly like the php-fpm image — it serves all JavaScript the browser executes and previously downloaded without any check.
+        - The relay family's TLS setup is modernised: deprecated `smtpd_use_tls`/`smtpd_tls_eecdh_grade` knobs and the frozen 2015-era cipher list are gone, the protocol floor is TLS 1.2 (opportunistic — a legacy sender without TLS 1.2 falls back to plaintext and the mail still arrives).
+        - The PostfixAdmin admin UI (plain HTTP) is published on loopback only; remote access goes through a TLS reverse proxy (README «Trade-off — admin UI without TLS»). Pinned by the compose contract.
+    - Fixed — test harness
+        - `tests/run-e2e.sh` forwards pytest arguments again: `docker compose run` replaces the service command entirely, so `-k <test>` used to be exec'd as the entrypoint instead of selecting tests.
     - Documentation
-        - README v2 leftovers corrected: the component overview names rspamd
-          (not OpenDKIM/milter-greylist), the roadmap note «virus scanning is
-          planned» is replaced by the integrated ClamAV description, and the
-          `NOTIFY_SMTP` example reflects the numeric-IPv4 requirement.
+        - README v2 leftovers corrected: the component overview names rspamd (not OpenDKIM/milter-greylist), the roadmap note «virus scanning is planned» is replaced by the integrated ClamAV description, and the `NOTIFY_SMTP` example reflects the numeric-IPv4 requirement.
 
 - 2026-07-18 **3.1.0**
-    - Changed — every image in the stack is now headless
-        - `postfix`, `dovecot`, `smtp-relay`, `smtp-relay-tls` and
-          `mailforward` now follow the same pattern as `rspamd`, `clamav` and
-          `redis`: a compiled C++ `init` binary configures the service from the
-          environment and execs the daemon — the shipped images contain **no
-          shell, no busybox, no perl and no package manager**. An attacker who
-          reaches code execution in any container finds nothing to pivot with.
-          All environment knobs and the on-disk data layouts are unchanged; the
-          whole e2e suite plus new relay-family tests pin the behaviour.
-        - The postfix family images inherit the accumulated `main.cf` from
-          their parent image at build time (`smtp-relay` → `mailforward` →
-          `postfix`); each build stage installs postfix fresh and layers its
-          deltas on top.
-        - Every image now offers `init --healthcheck` (TCP probe of its main
-          listener) for Docker healthchecks; mailforward's old bash/telnet
-          `health.sh` is gone.
-        - The dovecot Bayes-autotrainer wrappers `report-spam` / `report-ham`
-          are one static binary execing `rspamc` — same paths, same sieve
-          contract as the former shell wrappers.
-        - The relay family (`smtp-relay`, `smtp-relay-tls`, `mailforward`)
-          gets the same high, configurable delivery limits as postfix:
-          `MESSAGE_SIZE_LIMIT` (default 100 GiB, was postfix's 10 MB default)
-          and `SMTP_HARD_ERROR_LIMIT` (default 20; mailforward previously
-          hardcoded 1, which turned a single rejected recipient into an
-          abrupt disconnect).
-        - The relay family also gets postfix's `DISABLE_DNSBL` switch: strips
-          the DNS-blocklist lookups from the smtpd restrictions for
-          test/offline stacks whose resolver cannot answer the blocklist
-          zones (each lookup stalled the SMTP dialogue until the resolver
-          timeout).
+    - Changed — every image in the stack is now headless
+        - `postfix`, `dovecot`, `smtp-relay`, `smtp-relay-tls` and `mailforward` now follow the same pattern as `rspamd`, `clamav` and `redis`: a compiled C++ `init` binary configures the service from the environment and execs the daemon — the shipped images contain **no shell, no busybox, no perl and no package manager**. An attacker who reaches code execution in any container finds nothing to pivot with. All environment knobs and the on-disk data layouts are unchanged; the whole e2e suite plus new relay-family tests pin the behaviour.
+        - The postfix family images inherit the accumulated `main.cf` from their parent image at build time (`smtp-relay` → `mailforward` → `postfix`); each build stage installs postfix fresh and layers its deltas on top.
+        - Every image now offers `init --healthcheck` (TCP probe of its main listener) for Docker healthchecks; mailforward's old bash/telnet `health.sh` is gone.
+        - The dovecot Bayes-autotrainer wrappers `report-spam` / `report-ham` are one static binary execing `rspamc` — same paths, same sieve contract as the former shell wrappers.
+        - The relay family (`smtp-relay`, `smtp-relay-tls`, `mailforward`) gets the same high, configurable delivery limits as postfix: `MESSAGE_SIZE_LIMIT` (default 100 GiB, was postfix's 10 MB default) and `SMTP_HARD_ERROR_LIMIT` (default 20; mailforward previously hardcoded 1, which turned a single rejected recipient into an abrupt disconnect).
+        - The relay family also gets postfix's `DISABLE_DNSBL` switch: strips the DNS-blocklist lookups from the smtpd restrictions for test/offline stacks whose resolver cannot answer the blocklist zones (each lookup stalled the SMTP dialogue until the resolver timeout).
     - Fixed
-        - `mailforward`: the virtual alias map works again on current Alpine —
-          alpine builds postfix without Berkeley DB, so the historical `hash:`
-          map type no longer exists and every alias recipient drew a 451
-          temporary failure. The map is now compiled and looked up as `lmdb:`
-          (alpine's default type). Pinned by the new end-to-end forward test.
-        - **The mail queue is now persistent.** Postfix answers `250 Ok` as
-          soon as a mail is fsync'ed into its queue — from that moment the
-          server owns delivery and the sender never retries; a deferred mail
-          can sit in the queue for hours or days. `/var/spool/postfix` was
-          never a volume (in any previous version), so every container
-          recreate or image update silently destroyed
-          accepted-but-undelivered mail. All postfix-based images now declare
-          the queue as a volume, the compose maps named volumes
-          (`postfix-spool`, `mailforward-spool`), and the new
-          `tests/compose-contract.sh` fails the suite if the mapping is ever
-          removed.
-        - The image contract test now covers **all** own images of the stack
-          (previously only rspamd, clamav, postfixadmin(+proxy), snappymail).
-        - New e2e tests pin the relay-family invariants: SMTP banner/EHLO,
-          STARTTLS handshake on smtp-relay-tls, and a real end-to-end
-          mailforward virtual-alias forward delivered via MX lookup to the
-          test sink — plus a permanent 5xx for unmapped alias recipients.
+        - `mailforward`: the virtual alias map works again on current Alpine — alpine builds postfix without Berkeley DB, so the historical `hash:` map type no longer exists and every alias recipient drew a 451 temporary failure. The map is now compiled and looked up as `lmdb:` (alpine's default type). Pinned by the new end-to-end forward test.
+        - **The mail queue is now persistent.** Postfix answers `250 Ok` as soon as a mail is fsync'ed into its queue — from that moment the server owns delivery and the sender never retries; a deferred mail can sit in the queue for hours or days. `/var/spool/postfix` was never a volume (in any previous version), so every container recreate or image update silently destroyed accepted-but-undelivered mail. All postfix-based images now declare the queue as a volume, the compose maps named volumes (`postfix-spool`, `mailforward-spool`), and the new `tests/compose-contract.sh` fails the suite if the mapping is ever removed.
+        - The image contract test now covers **all** own images of the stack (previously only rspamd, clamav, postfixadmin(+proxy), snappymail).
+        - New e2e tests pin the relay-family invariants: SMTP banner/EHLO, STARTTLS handshake on smtp-relay-tls, and a real end-to-end mailforward virtual-alias forward delivered via MX lookup to the test sink — plus a permanent 5xx for unmapped alias recipients.
     - Removed
-        - `postfix`: the perl-based `postfix-policyd-spf-perl` and its
-          `CHECK_SPF` knob (v3.0.0 had already unwired it by default) — SPF
-          verification is rspamd's SPF module.
-        - `postfix`: baked-in debug settings (`debug_peer_list`, TLS handshake
-          loglevel 2). TLS logging is now `POSTFIX_TLS_LOGLEVEL` (default 0 —
-          production default; the e2e stack sets 2 for diagnosable logs).
-        - `smtp-relay-tls`: the unused `DAYS` env; `postfix`: the unused
-          `LOCAL_DOMAINS` env.
+        - `postfix`: the perl-based `postfix-policyd-spf-perl` and its `CHECK_SPF` knob (v3.0.0 had already unwired it by default) — SPF verification is rspamd's SPF module.
+        - `postfix`: baked-in debug settings (`debug_peer_list`, TLS handshake loglevel 2). TLS logging is now `POSTFIX_TLS_LOGLEVEL` (default 0 — production default; the e2e stack sets 2 for diagnosable logs).
+        - `smtp-relay-tls`: the unused `DAYS` env; `postfix`: the unused `LOCAL_DOMAINS` env.
 
 - 2026-07-18 **3.0.1**
     - Security
-        - `dovecot`: verbose auth debug logging is no longer baked into the
-          image — it is off by default and only enabled by the new
-          `DOVECOT_DEBUG_AUTH=yes` diagnostics override (the e2e stack sets it
-          to keep failure logs verbose).
-        - `dovecot`: the forced-TLS login invariant is now pinned by e2e
-          tests — cleartext authentication on an unencrypted connection is
-          proven to be refused for IMAP, POP3 and ManageSieve.
-        - `dovecot`: the root run-mode of the container and the trust model of
-          the internal LMTP/SASL listeners are now documented as explicit
-          security trade-offs in the image README.
+        - `dovecot`: verbose auth debug logging is no longer baked into the image — it is off by default and only enabled by the new `DOVECOT_DEBUG_AUTH=yes` diagnostics override (the e2e stack sets it to keep failure logs verbose).
+        - `dovecot`: the forced-TLS login invariant is now pinned by e2e tests — cleartext authentication on an unencrypted connection is proven to be refused for IMAP, POP3 and ManageSieve.
+        - `dovecot`: the root run-mode of the container and the trust model of the internal LMTP/SASL listeners are now documented as explicit security trade-offs in the image README.
     - Changed
-        - `dovecot`: image cleanup — removed unused environment leftovers,
-          modernized the Dockerfile (no more build warnings), completed the
-          declared ports (POP3, POP3S, ManageSieve).
+        - `dovecot`: image cleanup — removed unused environment leftovers, modernized the Dockerfile (no more build warnings), completed the declared ports (POP3, POP3S, ManageSieve).
 
 - 2026-07-18 **3.0.0**
-    - ⚠️ BREAKING — mail filtering stack replaced
-        - v3.0.0 retires the historical multi-container antispam chain
-          (`opendkim`, `opendmarc`, `postgrey`, `postfix-policyd-spf-perl`)
-          and replaces it with **one `rspamd`** container, backed by a headless
-          `redis` for state and `clamav` for antivirus. Rspamd does DKIM
-          signing, DKIM verify, DMARC, SPF, greylisting, Bayes-scored spam
-          and virus scanning through a single milter port.
-        - **If your existing `docker-compose.yml` still names `opendkim`,
-          `opendmarc`, `postgrey` or the old milter envs on `postfix`** it will
-          fail to boot until you migrate. See the README section «Upgrading
-          from v2.x (opendkim + opendmarc + postgrey + policyd-spf)» — three
-          services to swap, one DKIM-key volume rename, no DNS change.
+    - ⚠️ BREAKING — mail filtering stack replaced
+        - v3.0.0 retires the historical multi-container antispam chain (`opendkim`, `opendmarc`, `postgrey`, `postfix-policyd-spf-perl`) and replaces it with **one `rspamd`** container, backed by a headless `redis` for state and `clamav` for antivirus. Rspamd does DKIM signing, DKIM verify, DMARC, SPF, greylisting, Bayes-scored spam and virus scanning through a single milter port.
+        - **If your existing `docker-compose.yml` still names `opendkim`, `opendmarc`, `postgrey` or the old milter envs on `postfix`** it will fail to boot until you migrate. See the README section «Upgrading from v2.x (opendkim + opendmarc + postgrey + policyd-spf)» — three services to swap, one DKIM-key volume rename, no DNS change.
     - Added
-        - `mwaeckerlin/rspamd` — headless three-stage scratch image with a
-          compiled C++ `init` that generates one 2048-bit DKIM key per
-          domain on first start (via `rspamadm dkim_keygen`), stages
-          `local.d/*.conf` from templates according to `DKIM_DMARC`, and
-          optionally mails the DNS TXT records to `NOTIFY_EMAIL` via a
-          minimal in-process SMTP client.
-        - `mwaeckerlin/redis` — headless three-stage scratch image (only
-          `redis-server`, no `redis-cli`). AOF persistence + `allkeys-lfu`
-          eviction defaults; backs rspamd's Bayes / greylist / ratelimit
-          state.
-        - `mwaeckerlin/clamav` — three-stage image running `clamd` +
-          `freshclam --daemon` under a supervising C++ `init` (bootstraps
-          the DB, keeps freshclam running as a child, execs into clamd as
-          PID 1).
-        - SnappyMail release tarball is now OpenPGP-verified against a key
-          pinned in `rainloop/snappymail-signing-key.asc` at build time;
-          the build refuses a tarball that does not verify. `SKIP_GPG_VERIFY=1`
-          build-arg exists solely for the e2e stack, which ships the
-          placeholder key on purpose.
-        - OpenPGP in the webmail: the SnappyMail image ships the php-gnupg
-          extension (compiled from the pinned upstream release) plus the gpg
-          binary it drives — verifying signed mail and signing/encrypting
-          outgoing mail works without extra installation.
-        - `RSPAMD_LOG_LEVEL` env on rspamd (default `notice`; `info` shows
-          every learn/scan decision — used by the e2e stack for diagnosable
-          failure logs).
-        - Bayes autotraining via dovecot's `imap_sieve`: moving mail into or
-          out of the `Junk` folder in any IMAP client fires
-          `sieve/learn-{spam,ham}.sieve` → `rspamc learn_{spam,ham}` against
-          the sibling rspamd controller. Event-driven, no cron.
-        - `SPAM_DELIVERY_MODE` env on dovecot: `reject` (default; mailservice
-          design), `mark` (add `X-Spam-Flag` etc. headers, never touch the
-          body / subject to protect the sender's DKIM signature), `folder`
-          (server-side sieve routes to IMAP «Junk», silent quarantine, not
-          recommended).
-        - README section «Antispam, antivirus, signing — one rspamd» plus
-          «Antivirus (ClamAV)», «Bayes-scored spam and autotraining»,
-          «SPAM_DELIVERY_MODE» and legal-framing note on «SMTP-reject vs.
-          Aufbewahrungspflicht».
-        - e2e tests: `test_virus_reject.py` (clamd INSTREAM probe + EICAR
-          inline in the body + EICAR as attachment),
-          `test_spam_score_reject.py` (GTUBE + clean-mail sanity),
-          `test_bayes_autolearn.py` (Bayes counter advances on IMAP move
-          to/from Junk), `test_delivery_mode.py` (reject-mode contract),
-          `test_snappymail_gpg_verify.py` (positive + tampered-tarball +
-          unknown-key cases of the GPG-verify machinery), and a php-gnupg
-          image contract check.
-        - e2e now also exercises TLS end-to-end (`test_tls.py`): a
-          `certs-init` container drops a self-signed cert into the
-          `letsencrypt` volume so the cert-present → TLS-enabled wiring is
-          tested — STARTTLS on SMTP, authenticated submission over STARTTLS,
-          IMAPS on 993, IMAP STARTTLS on 143.
+        - `mwaeckerlin/rspamd` — headless three-stage scratch image with a compiled C++ `init` that generates one 2048-bit DKIM key per domain on first start (via `rspamadm dkim_keygen`), stages `local.d/*.conf` from templates according to `DKIM_DMARC`, and optionally mails the DNS TXT records to `NOTIFY_EMAIL` via a minimal in-process SMTP client.
+        - `mwaeckerlin/redis` — headless three-stage scratch image (only `redis-server`, no `redis-cli`). AOF persistence + `allkeys-lfu` eviction defaults; backs rspamd's Bayes / greylist / ratelimit state.
+        - `mwaeckerlin/clamav` — three-stage image running `clamd` + `freshclam --daemon` under a supervising C++ `init` (bootstraps the DB, keeps freshclam running as a child, execs into clamd as PID 1).
+        - SnappyMail release tarball is now OpenPGP-verified against a key pinned in `rainloop/snappymail-signing-key.asc` at build time; the build refuses a tarball that does not verify. `SKIP_GPG_VERIFY=1` build-arg exists solely for the e2e stack, which ships the placeholder key on purpose.
+        - OpenPGP in the webmail: the SnappyMail image ships the php-gnupg extension (compiled from the pinned upstream release) plus the gpg binary it drives — verifying signed mail and signing/encrypting outgoing mail works without extra installation.
+        - `RSPAMD_LOG_LEVEL` env on rspamd (default `notice`; `info` shows every learn/scan decision — used by the e2e stack for diagnosable failure logs).
+        - Bayes autotraining via dovecot's `imap_sieve`: moving mail into or out of the `Junk` folder in any IMAP client fires `sieve/learn-{spam,ham}.sieve` → `rspamc learn_{spam,ham}` against the sibling rspamd controller. Event-driven, no cron.
+        - `SPAM_DELIVERY_MODE` env on dovecot: `reject` (default; mailservice design), `mark` (add `X-Spam-Flag` etc. headers, never touch the body / subject to protect the sender's DKIM signature), `folder` (server-side sieve routes to IMAP «Junk», silent quarantine, not recommended).
+        - README section «Antispam, antivirus, signing — one rspamd» plus «Antivirus (ClamAV)», «Bayes-scored spam and autotraining», «SPAM_DELIVERY_MODE» and legal-framing note on «SMTP-reject vs. Aufbewahrungspflicht».
+        - e2e tests: `test_virus_reject.py` (clamd INSTREAM probe + EICAR inline in the body + EICAR as attachment), `test_spam_score_reject.py` (GTUBE + clean-mail sanity), `test_bayes_autolearn.py` (Bayes counter advances on IMAP move to/from Junk), `test_delivery_mode.py` (reject-mode contract), `test_snappymail_gpg_verify.py` (positive + tampered-tarball + unknown-key cases of the GPG-verify machinery), and a php-gnupg image contract check.
+        - e2e now also exercises TLS end-to-end (`test_tls.py`): a `certs-init` container drops a self-signed cert into the `letsencrypt` volume so the cert-present → TLS-enabled wiring is tested — STARTTLS on SMTP, authenticated submission over STARTTLS, IMAPS on 993, IMAP STARTTLS on 143.
     - Changed
-        - **Delivery-affecting limits are now high, configurable and
-          documented** — a legitimate mail is never bounced by an artificial
-          default:
-            - `postfix`: `message_size_limit` and `smtpd_hard_error_limit` are
-              no longer hardcoded. New env `MESSAGE_SIZE_LIMIT` (bytes, default
-              **100 GiB** so even several photos/videos in one mail pass, `0` =
-              unlimited; `mailbox_size_limit` is pinned to the same value) and
-              `SMTP_HARD_ERROR_LIMIT` (default raised to the postfix standard
-              20 — the previous value of 1 turned a single protocol hiccup into
-              an abrupt 421).
-            - `clamav`: scan limits raised to clamav's architectural maxima
-              (`CLAMD_MAX_FILESIZE` 2 GiB — clamav's internal hard cap,
-              `CLAMD_MAX_SCANSIZE` 4 GiB) and the previously-unset
-              `CLAMD_STREAM_MAXLENGTH` (4 GiB; clamd's own default is only
-              25 MB, which silently aborted the Rspamd INSTREAM for larger
-              mails). Scanning is fail-open: a mail exceeding the limits — or
-              larger than clamav can scan at all (>2 GiB per file / >4 GiB per
-              message, a clamav architectural limit) — is delivered unscanned,
-              never bounced.
-            - `rspamd`/`redis` documented as never rejecting on size; the only
-              reject knob remains the spam score vs. `RSPAMD_REJECT_SCORE`
-              (15, Rspamd's own conservative default; see rspamd README
-              «Scores and thresholds»).
-        - `postfix`: `OPENDKIM`, `OPENDMARC` and `GREYLIST` env vars removed;
-          one new `RSPAMD` env (host or host:port, default port 11332).
-          `CHECK_SPF` auto-disables when `RSPAMD` is set — rspamd's SPF
-          module covers this and running policyd-spf-perl in parallel would
-          produce contradictory verdicts.
-        - `dovecot`: adds `rspamd-client` to the build for the `rspamc`
-          binary used by the Bayes-autotrainer sieve wrappers. `imap_sieve`
-          and `sieve_extprograms` are now wired in `local.conf`. `start.sh`
-          writes `/etc/dovecot/sieve/spam-to-junk.sieve` from
-          `SPAM_DELIVERY_MODE` at start-up.
-        - `DKIM_DMARC` semantics preserved (off/log/permissive/reject) —
-          same four modes, same behaviour contract, now enforced by rspamd
-          instead of opendkim + opendmarc (bad-signature rejection via a
-          force-action rule, DMARC `p=reject` enforcement via the DMARC
-          module's reject action).
-        - **Greylisting is now score-based** (semantic change): postgrey
-          delayed every unknown sender triplet with a 4xx; rspamd's greylist
-          module only delays mail whose spam score crosses the greylist
-          threshold. Clean mail from first-time senders is delivered on the
-          first attempt — aligned with the «reliability over filtering»
-          design. Own users (SASL) remain exempt in all cases.
-        - The e2e stack now runs three parallel rspamd instances (one per
-          DKIM_DMARC mode) sharing one redis and one clamav, replacing the
-          three parallel opendkim + opendmarc pairs of v2.x. Greylist
-          timeouts / expires and the local-IP-check flag are env-driven so
-          the test suite can shrink the delay from 300 s to 5 s without
-          patching the rspamd config.
-        - `postfix/README.md` remains minimal — the RSPAMD env is documented
-          in the Dockerfile's ENV block and in the mailservice compose.
-        - **Authentication is now encrypted-only by default.** Dovecot
-          `auth_allow_cleartext` defaults to `no` (new
-          `DOVECOT_ALLOW_CLEARTEXT` env), so the cleartext PLAIN/LOGIN
-          mechanisms are offered only over TLS — a client must use
-          IMAPS/POP3S/managesieve-TLS or issue STARTTLS before
-          authenticating, and a password is never transmitted in the clear.
-          Postfix keeps `smtpd_tls_auth_only=yes`, so SMTP submission SASL is
-          likewise TLS-only. Soften only deliberately via
-          `DOVECOT_ALLOW_CLEARTEXT=yes` (e.g. a trusted isolated network
-          without certificates); see the dovecot and mailservice READMEs.
+        - **Delivery-affecting limits are now high, configurable and documented** — a legitimate mail is never bounced by an artificial default:
+            - `postfix`: `message_size_limit` and `smtpd_hard_error_limit` are no longer hardcoded. New env `MESSAGE_SIZE_LIMIT` (bytes, default **100 GiB** so even several photos/videos in one mail pass, `0` = unlimited; `mailbox_size_limit` is pinned to the same value) and `SMTP_HARD_ERROR_LIMIT` (default raised to the postfix standard 20 — the previous value of 1 turned a single protocol hiccup into an abrupt 421).
+            - `clamav`: scan limits raised to clamav's architectural maxima (`CLAMD_MAX_FILESIZE` 2 GiB — clamav's internal hard cap, `CLAMD_MAX_SCANSIZE` 4 GiB) and the previously-unset `CLAMD_STREAM_MAXLENGTH` (4 GiB; clamd's own default is only 25 MB, which silently aborted the Rspamd INSTREAM for larger mails). Scanning is fail-open: a mail exceeding the limits — or larger than clamav can scan at all (>2 GiB per file / >4 GiB per message, a clamav architectural limit) — is delivered unscanned, never bounced.
+            - `rspamd`/`redis` documented as never rejecting on size; the only reject knob remains the spam score vs. `RSPAMD_REJECT_SCORE` (15, Rspamd's own conservative default; see rspamd README «Scores and thresholds»).
+        - `postfix`: `OPENDKIM`, `OPENDMARC` and `GREYLIST` env vars removed; one new `RSPAMD` env (host or host:port, default port 11332). `CHECK_SPF` auto-disables when `RSPAMD` is set — rspamd's SPF module covers this and running policyd-spf-perl in parallel would produce contradictory verdicts.
+        - `dovecot`: adds `rspamd-client` to the build for the `rspamc` binary used by the Bayes-autotrainer sieve wrappers. `imap_sieve` and `sieve_extprograms` are now wired in `local.conf`. `start.sh` writes `/etc/dovecot/sieve/spam-to-junk.sieve` from `SPAM_DELIVERY_MODE` at start-up.
+        - `DKIM_DMARC` semantics preserved (off/log/permissive/reject) — same four modes, same behaviour contract, now enforced by rspamd instead of opendkim + opendmarc (bad-signature rejection via a force-action rule, DMARC `p=reject` enforcement via the DMARC module's reject action).
+        - **Greylisting is now score-based** (semantic change): postgrey delayed every unknown sender triplet with a 4xx; rspamd's greylist module only delays mail whose spam score crosses the greylist threshold. Clean mail from first-time senders is delivered on the first attempt — aligned with the «reliability over filtering» design. Own users (SASL) remain exempt in all cases.
+        - The e2e stack now runs three parallel rspamd instances (one per DKIM_DMARC mode) sharing one redis and one clamav, replacing the three parallel opendkim + opendmarc pairs of v2.x. Greylist timeouts / expires and the local-IP-check flag are env-driven so the test suite can shrink the delay from 300 s to 5 s without patching the rspamd config.
+        - `postfix/README.md` remains minimal — the RSPAMD env is documented in the Dockerfile's ENV block and in the mailservice compose.
+        - **Authentication is now encrypted-only by default.** Dovecot `auth_allow_cleartext` defaults to `no` (new `DOVECOT_ALLOW_CLEARTEXT` env), so the cleartext PLAIN/LOGIN mechanisms are offered only over TLS — a client must use IMAPS/POP3S/managesieve-TLS or issue STARTTLS before authenticating, and a password is never transmitted in the clear. Postfix keeps `smtpd_tls_auth_only=yes`, so SMTP submission SASL is likewise TLS-only. Soften only deliberately via `DOVECOT_ALLOW_CLEARTEXT=yes` (e.g. a trusted isolated network without certificates); see the dovecot and mailservice READMEs.
     - Removed
-        - Submodule pointers: `opendkim`, `opendmarc`, `postgrey`. The
-          filter chain lives entirely in `rspamd` + `redis` + `clamav`.
-        - `postfix-policyd-spf-perl` is still installed in the postfix image
-          for backward compatibility (`CHECK_SPF=yes` overrides the auto-off)
-          but is no longer wired by default.
-        - `tests/dkim-dmarc-mode.sh` and `tests/opendkim-multidomain.sh`
-          (opendkim/opendmarc conf-based shell tests, obsolete under rspamd).
+        - Submodule pointers: `opendkim`, `opendmarc`, `postgrey`. The filter chain lives entirely in `rspamd` + `redis` + `clamav`.
+        - `postfix-policyd-spf-perl` is still installed in the postfix image for backward compatibility (`CHECK_SPF=yes` overrides the auto-off) but is no longer wired by default.
+        - `tests/dkim-dmarc-mode.sh` and `tests/opendkim-multidomain.sh` (opendkim/opendmarc conf-based shell tests, obsolete under rspamd).
     - Security
-        - The `postfixadmin` image carries a **documented, time-bounded
-          workaround** for two upstream `spomky-labs/otphp` advisories
-          (`GHSA-g7m4-839x-ch6v` HIGH, `GHSA-2jx3-65f3-xr8r` MEDIUM) that are
-          unfixed in the version PostfixAdmin pins. A code audit shows the
-          vulnerable code paths (`Factory::loadFromProvisioningUri`) are not
-          reachable — PostfixAdmin only ever *creates* TOTP secrets and
-          provisioning URIs. The build therefore proceeds with the audited
-          version, and a build-time guard re-surfaces the issue for review if
-          upstream still has not fixed it by 2026-08-16. See README «Security
-          workarounds».
+        - The `postfixadmin` image carries a **documented, time-bounded workaround** for two upstream `spomky-labs/otphp` advisories (`GHSA-g7m4-839x-ch6v` HIGH, `GHSA-2jx3-65f3-xr8r` MEDIUM) that are unfixed in the version PostfixAdmin pins. A code audit shows the vulnerable code paths (`Factory::loadFromProvisioningUri`) are not reachable — PostfixAdmin only ever *creates* TOTP secrets and provisioning URIs. The build therefore proceeds with the audited version, and a build-time guard re-surfaces the issue for review if upstream still has not fixed it by 2026-08-16. See README «Security workarounds».
 
 - 2026-07-17 **2.0.0**
-    - ⚠️ BREAKING — one switch for DKIM and DMARC enforcement
-        - `DKIM_DMARC` replaces the earlier enforcement switches and takes
-          four levels: `off` (no verification), `log` (verify and stamp the
-          result on every mail, never reject), `permissive` (reject a broken
-          signature or one whose key is missing from DNS, accept unsigned
-          mail, reject on a DMARC `p=reject` hard fail) and `reject` (also
-          reject unsigned mail). The signing and the DMARC service must
-          carry the same value or DMARC alignment breaks.
-        - The image default is `reject`, so a blind image pull lands in the
-          strictest mode. An existing deployment that names these services
-          decides explicitly: start at `log`, watch the delivered mail for a
-          few days, then escalate. The compose file shipped here starts in
-          `log`.
-        - A deployment whose compose file never named these services keeps
-          its previous behaviour: the filters are wired into the mail path
-          only when their variables are set, and both default to empty.
-        - `DKIM_KEYERROR_ACTION` turns the missing-key case into a temporary
-          failure for the length of a key rotation, so the sending server
-          retries instead of getting a permanent refusal.
+    - ⚠️ BREAKING — one switch for DKIM and DMARC enforcement
+        - `DKIM_DMARC` replaces the earlier enforcement switches and takes four levels: `off` (no verification), `log` (verify and stamp the result on every mail, never reject), `permissive` (reject a broken signature or one whose key is missing from DNS, accept unsigned mail, reject on a DMARC `p=reject` hard fail) and `reject` (also reject unsigned mail). The signing and the DMARC service must carry the same value or DMARC alignment breaks.
+        - The image default is `reject`, so a blind image pull lands in the strictest mode. An existing deployment that names these services decides explicitly: start at `log`, watch the delivered mail for a few days, then escalate. The compose file shipped here starts in `log`.
+        - A deployment whose compose file never named these services keeps its previous behaviour: the filters are wired into the mail path only when their variables are set, and both default to empty.
+        - `DKIM_KEYERROR_ACTION` turns the missing-key case into a temporary failure for the length of a key rotation, so the sending server retries instead of getting a permanent refusal.
     - Added
-        - DMARC enforcement on incoming mail: mail that fails DMARC against
-          a sender publishing `p=reject` is refused during the SMTP dialogue,
-          also when it arrives entirely unsigned. The service ships as a
-          minimal image with no shell and no package manager.
-        - README: the complete verification matrix per mode, plus a section
-          on what to look for in delivered mail before switching from
-          monitoring to enforcement.
+        - DMARC enforcement on incoming mail: mail that fails DMARC against a sender publishing `p=reject` is refused during the SMTP dialogue, also when it arrives entirely unsigned. The service ships as a minimal image with no shell and no package manager.
+        - README: the complete verification matrix per mode, plus a section on what to look for in delivered mail before switching from monitoring to enforcement.
     - Tests
-        - 127 checks green on a fresh stack: each of the four modes is
-          exercised through a real delivery over the whole chain, the DMARC
-          decisions are covered for `p=reject`, `p=none` and senders without
-          a DMARC record, every shipped image is proven to carry no shell,
-          and signing for several domains is verified.
+        - 127 checks green on a fresh stack: each of the four modes is exercised through a real delivery over the whole chain, the DMARC decisions are covered for `p=reject`, `p=none` and senders without a DMARC record, every shipped image is proven to carry no shell, and signing for several domains is verified.
 
 - 2026-07-14 **1.10.0**
     - Fixed
-        - Sending to a recipient who greylists works again. Since the
-          greylisting change of 1.6.0 the webmail returned «451 Greylisting
-          in action» to the user, the mail never entered the queue and had to
-          be sent again by hand. Your own authenticated users and the
-          internal networks are exempt from greylisting again, and the server
-          owns delivery and the retries once it has accepted a mail.
+        - Sending to a recipient who greylists works again. Since the greylisting change of 1.6.0 the webmail returned «451 Greylisting in action» to the user, the mail never entered the queue and had to be sent again by hand. Your own authenticated users and the internal networks are exempt from greylisting again, and the server owns delivery and the retries once it has accepted a mail.
     - Added
-        - DKIM signing for several sending domains: one key and one DNS
-          record per domain, generated on first start. Adding a domain later
-          keeps every existing key. The README shows how one mail service
-          serves several domains for SPF, DKIM and DMARC.
-        - The signing service ships as a minimal image with no shell, no
-          package manager and no Perl.
+        - DKIM signing for several sending domains: one key and one DNS record per domain, generated on first start. Adding a domain later keeps every existing key. The README shows how one mail service serves several domains for SPF, DKIM and DMARC.
+        - The signing service ships as a minimal image with no shell, no package manager and no Perl.
 
 - 2026-07-09 **1.9.0**
     - Fixed
-        - Mailboxes and Sieve filters are visible again after the Dovecot 2.4
-          update. The new configuration had changed the storage layout on
-          disk, so every mailbox appeared empty and the filters were gone.
-          The layout `<domain>/<localpart>` is restored and pinned by a test.
+        - Mailboxes and Sieve filters are visible again after the Dovecot 2.4 update. The new configuration had changed the storage layout on disk, so every mailbox appeared empty and the filters were gone. The layout `<domain>/<localpart>` is restored and pinned by a test.
         - Dovecot no longer restarts in a loop when a certificate is present.
     - Documentation
-        - How to bring the account database up to date after an image
-          update, that every user has to set a new password after the update
-          because the old weak hashes are refused, and the requirement for
-          MariaDB 11 or newer.
+        - How to bring the account database up to date after an image update, that every user has to set a new password after the update because the old weak hashes are refused, and the requirement for MariaDB 11 or newer.
 
 - 2026-06-24 **1.8.0**
     - Added
-        - Outgoing mail is signed with DKIM, incoming signatures are
-          verified, and the SPF record of the sender is checked. The README
-          carries the DNS records to publish, the roll-out order and the key
-          rotation procedure.
-        - The admin interface is served from the directory the application
-          expects, so its pages are reachable without a path prefix.
+        - Outgoing mail is signed with DKIM, incoming signatures are verified, and the SPF record of the sender is checked. The README carries the DNS records to publish, the roll-out order and the key rotation procedure.
+        - The admin interface is served from the directory the application expects, so its pages are reachable without a path prefix.
 
 - 2026-06-12 **1.7.0**
     - Fixed
-        - Both web interfaces work from end to end: creating a domain and a
-          mailbox in the administration, logging into the webmail, reading a
-          mail and sending one. PHP warnings no longer corrupt the pages and
-          the login of the webmail administration.
+        - Both web interfaces work from end to end: creating a domain and a mailbox in the administration, logging into the webmail, reading a mail and sending one. PHP warnings no longer corrupt the pages and the login of the webmail administration.
 
 - 2026-05-24 **1.6.0**
     - Changed
-        - Greylisting runs on milter-greylist because postgrey disappeared
-          from the distribution. The greylist database survives a container
-          restart.
-        - The webmail is SnappyMail. RainLoop is abandoned upstream;
-          SnappyMail reads the same data.
+        - Greylisting runs on milter-greylist because postgrey disappeared from the distribution. The greylist database survives a container restart.
+        - The webmail is SnappyMail. RainLoop is abandoned upstream; SnappyMail reads the same data.
     - Added
         - POP3 and POP3S beside IMAP.
-        - Mail is signed with DKIM, incoming mail is checked against the
-          sender's SPF record, and the DMARC records to publish are
-          documented.
-        - An automated test suite that delivers, fetches and filters real
-          mail over SMTP, IMAP, POP3 and Sieve, exercises greylisting, DKIM
-          and SPF, and drives both web interfaces in a browser.
-        - An overlay for local development: unprivileged ports, a webmail and
-          a relay that catches all outgoing mail.
+        - Mail is signed with DKIM, incoming mail is checked against the sender's SPF record, and the DMARC records to publish are documented.
+        - An automated test suite that delivers, fetches and filters real mail over SMTP, IMAP, POP3 and Sieve, exercises greylisting, DKIM and SPF, and drives both web interfaces in a browser.
+        - An overlay for local development: unprivileged ports, a webmail and a relay that catches all outgoing mail.
     - Documentation
-        - The delivery promise is written down: a mail is delivered to the
-          INBOX or refused with an informative error to the sender, without
-          a spam folder and without a silent drop, and a table names how each
-          component upholds it.
+        - The delivery promise is written down: a mail is delivered to the INBOX or refused with an informative error to the sender, without a spam folder and without a silent drop, and a table names how each component upholds it.
 
 - 2025-07-18 **1.5.0**
     - Added
-        - `HOSTROOT` names the root domain of the mail host separately from
-          the host name.
+        - `HOSTROOT` names the root domain of the mail host separately from the host name.
         - More log output on the mail server for diagnosing delivery.
 
 - 2022-02-08 **1.4.0**
     - Changed
-        - The message size limit is 1GB, so a mail with several photos or a
-          video passes.
+        - The message size limit is 1GB, so a mail with several photos or a video passes.
         - The webmail runs on the current PHP version.
 
 - 2021-09-17 **1.3.0**
     - Added
-        - A webmailer: mail is read and written in the browser, on the same
-          accounts.
+        - A webmailer: mail is read and written in the browser, on the same accounts.
         - The relay images run postfix 3.6.
     - Documentation
-        - The TLS settings a mail client needs: IMAP on 993, submission on
-          587, ManageSieve on 4190.
+        - The TLS settings a mail client needs: IMAP on 993, submission on 587, ManageSieve on 4190.
 
 - 2021-06-26 **1.2.0**
     - Added
-        - The administration runs behind its own web server, so the account
-          management is reachable without exposing the application server.
+        - The administration runs behind its own web server, so the account management is reachable without exposing the application server.
     - Fixed
-        - TLS for the mail server and the mailbox server, and authentication
-          of your own users against the mailbox server, so a client can send
-          through the server after logging in.
+        - TLS for the mail server and the mailbox server, and authentication of your own users against the mailbox server, so a client can send through the server after logging in.
 
 - 2021-06-20 **1.1.0**
     - Added
-        - The complete mail server: postfix accepts and delivers mail,
-          dovecot serves the mailboxes over IMAP and runs the Sieve filters,
-          PostfixAdmin manages domains, mailboxes and aliases, and
-          greylisting keeps the first attempt of an unknown sender waiting.
-          Forwarding and two relay variants are part of the stack.
+        - The complete mail server: postfix accepts and delivers mail, dovecot serves the mailboxes over IMAP and runs the Sieve filters, PostfixAdmin manages domains, mailboxes and aliases, and greylisting keeps the first attempt of an unknown sender waiting. Forwarding and two relay variants are part of the stack.
 
 - 2021-06-11 **1.0.0**
     - Added
-        - The first running installation: PostfixAdmin with its database,
-          reachable in the browser, with the setup password, the welcome
-          text, the default aliases and the branding configurable from the
-          compose file.
+        - The first running installation: PostfixAdmin with its database, reachable in the browser, with the setup password, the welcome text, the default aliases and the branding configurable from the compose file.
