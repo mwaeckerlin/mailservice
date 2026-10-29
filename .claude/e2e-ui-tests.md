@@ -34,4 +34,3 @@ Facts for `mailservice/tests/e2e/test_webui.py` that took long to find and are n
 
 - The PHP-FPM base (`mwaeckerlin/php-fpm`) has `display_errors = on`, so PHP deprecation warnings land in HTTP bodies and break JSON and HTML. The Dockerfiles of postfixadmin and rainloop switch `display_errors` and `display_startup_errors` off with `sed`, and set `clear_env = no` (or the FPM worker sees no environment variables).
 - PostfixAdmin: do NOT replace `config.inc.php` (it loses 4.x defaults such as `dkim`); put the overrides into `config.local.php`. Both files lie under `/root/etc/postfixadmin/`, because `COPY --from=build /root/ /` does not copy symlink targets outside `/root/`.
-- Docker Compose: a `$` in a YAML value is escaped as `$$` (bcrypt hashes `$2y$12$...`).

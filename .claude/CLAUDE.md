@@ -41,8 +41,8 @@ Full statement: README.md «Design philosophy: reliability over filtering».
 - An explicit `racl greylist default` disables the built-in auto-whitelist —
   omit it; unmatched connections are greylisted by the implicit default.
 - Changes to greylisting behavior must keep the whole `test_greylisting.py`
-  suite green on a FRESH stack (`down -v` first; warm stacks carry greylist/
-  autowhite state and produce phantom results).
+  suite green; it measures greylist and autowhite state, which a warm stack
+  carries from earlier runs.
 
 ## dovecot pitfalls
 
@@ -54,6 +54,21 @@ Full statement: README.md «Design philosophy: reliability over filtering».
   compiled init writes `conf.d/10-debug.conf`); never bake `log_debug`
   into `local.conf` — that is a production default seen by every log
   reader.
+- **A `:regex` condition without `:comparator "i;octet"` folds case,**
+  because Sieve compares with `i;ascii-casemap` by default. The subject
+  is folded before the expression sees it, so the letter case is gone
+  and no expression can recover it: `[A-Z]` and `[a-z]` both match every
+  letter, `^[^a-z]+$` and `not [a-z]` match no subject at all. A rule
+  meant for shouting subject lines therefore either rejects everything
+  or nothing. Where it rejects and stops, every later rule of the script
+  is dead and the mail is gone — which looks exactly like one single
+  filter being broken. Measured with `sieve-test` in the image,
+  2026-10-28, over seven expressions and two subjects. The webmail's
+  filter form cannot write a comparator, so such a rule has to be kept
+  in the script by hand or dropped. Pinned by
+  `tests/v1/test_sieve_filters.py`. `regex` itself needs no
+  `sieve_extensions` entry: Pigeonhole 2.4.5 carries it in the default
+  list, measured with `doveconf sieve_extensions`.
 
 ## Config migrations & component replacements
 
@@ -61,10 +76,3 @@ On any config port across a major version, preserve the on-disk data layout
 (paths, storage schemes) or ship a data migration — see
 `tests/e2e/test_maildir_layout.py` and the Dovecot 2.4 regression in
 CHANGELOG.md.
-
-More generally, when replacing any component or mechanism: list the
-behavioural invariants of the old setup (e.g. "SASL-authenticated clients
-are never greylisted"), reproduce each one explicitly in the new setup and
-pin it with an e2e test; verify the semantics of every flag/option against
-the manual instead of assuming it — see the greylisting regression pinned
-by `tests/e2e/test_greylisting.py::test_authenticated_submission_not_greylisted`.
