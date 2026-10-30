@@ -1,5 +1,8 @@
 # Changelog
 
+- 2026-10-30 **3.5.3**
+    - The stack carries dovecot 3.5.6, whose test of the admin sieve block measures the default case with a check that can pass.
+
 - 2026-10-30 **3.5.2**
     - Sieve filters sort mail again. Dovecot kept the user's home on the maildir root, where `.dovecot.sieve` looks like a mailbox, because `.` is the hierarchy separator of a maildir; the webmail stored every script and the delivery ran none of them. The home now lies under `/var/mail/domains/.sieve/<domain>/<user>/`, and the scripts of an older image are moved there once, on the first start, so every filter a user had keeps working.
     - A server-wide Sieve script the webmail cannot overwrite runs before every user script (`SIEVE_ADMIN_SCRIPT` on the dovecot service). It may route and file, never `reject`: a reject at delivery answers the envelope sender, which unwanted mail forges, so a rule that refuses belongs in postfix.
