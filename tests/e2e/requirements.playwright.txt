@@ -3,5 +3,7 @@ pytest-playwright>=0.7.0
 playwright==1.60.0
 # DKIM signing/verification simulator for test_dkim_verify.py
 dkimpy>=1.1
+# dkimpy pulls dnspython, and 2.8.0 carries CVE-2026-114605
+dnspython>=2.9
 # direct schema-version assertions for test_schema_upgrade.py
 pymysql>=1.1

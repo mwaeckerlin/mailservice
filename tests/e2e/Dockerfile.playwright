@@ -1,12 +1,20 @@
-FROM mcr.microsoft.com/playwright/python:v1.60.0-jammy
+FROM mcr.microsoft.com/playwright/python:v1.60.0-noble
 WORKDIR /tests
 # gnupg is needed by test_snappymail_gpg_verify.py to prove the
 # rainloop/Dockerfile's `gpg --verify` machinery works — positive
 # (signed) and negative (tampered / unknown-key) cases are all done
 # in-process, no docker build required.
+# python3-venv: pip-audit resolves a requirements file in a virtual
+# environment of its own, and the base image ships no ensurepip.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends gnupg \
+    && apt-get install -y --no-install-recommends gnupg python3-venv \
     && rm -rf /var/lib/apt/lists/*
+# Ubuntu noble marks its python as externally managed (PEP 668), so
+# the packages of the suite live in a virtual environment of their own.
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:${PATH}"
 COPY requirements.playwright.txt ./
-RUN pip install --no-cache-dir -r requirements.playwright.txt
+# pip-audit lives in this image, not on the host: the dependency audit
+# of `npm run audit` reads the versions actually installed here.
+RUN pip install --no-cache-dir -r requirements.playwright.txt pip-audit
 COPY . .

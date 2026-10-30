@@ -15,6 +15,15 @@ from helpers.managesieve import ManageSieveClient, ManageSieveError
 
 SIEVE_PORT = 4190
 FOLDER = "SieveRuns"
+HELO = "test-runner.test.local"
+"""The name every session of this suite greets with.
+
+It resolves in the stack's own resolver. Without it smtplib
+greets with the address literal of the container, on which the
+SPF policy service of the 1 line fails with SERVFAIL, and
+postfix then answers 450 to every recipient.
+"""
+
 SENDER = "someone@extern.local"
 
 TRIVIAL_SCRIPT = f"""require ["fileinto"];
@@ -59,7 +68,8 @@ def test_an_active_script_is_executed_at_delivery(provision_mail_accounts,
     from test_sieve_filters import _find_in
 
     raw = build_message(unique_subject, "does sieve run", SENDER, ALICE)
-    with smtplib.SMTP(POSTFIX, SMTP_P, timeout=30) as smtp:
+    with smtplib.SMTP(POSTFIX, SMTP_P, timeout=30,
+                      local_hostname=HELO) as smtp:
         refused = smtp.sendmail(SENDER, [ALICE], raw)
     assert refused == {}, f"recipient refused: {refused}"
 

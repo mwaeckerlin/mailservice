@@ -1,5 +1,10 @@
 # Changelog
 
+- 2026-10-30 **3.5.4**
+    - The READMEs of both relays say what was measured about the Spamhaus listing of 2026-10-27 and what Spamhaus gives as its reason: the address pool, not the container name the entry carried.
+    - The suite of the version line 1 measures what a filter really does to a shouting subject: the rule matches, its `reject` runs at delivery when the message is already accepted, fails there, and the implicit keep stores the message in INBOX — which is why a rule that refuses belongs in postfix. Its sender domain now resolves in the stack's own resolver and every session greets with a name, as the new plausibility checks of `postfix:1` demand.
+    - `npm run audit` checks the dependencies of both test suites against the advisory database, in the test container itself: no tool has to be installed on the machine. It found `dnspython 2.8.0` with CVE-2026-114605, which `dkimpy` pulls in; the fix needs Python 3.11, so both test images move from Ubuntu jammy to noble and install the suite into a virtual environment of their own, which noble requires (PEP 668).
+
 - 2026-10-30 **3.5.3**
     - The stack carries dovecot 3.5.6, whose test of the admin sieve block measures the default case with a check that can pass.
 

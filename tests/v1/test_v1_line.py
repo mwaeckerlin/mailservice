@@ -14,6 +14,15 @@ from conftest import (ALICE, ALICE_PW, DOMAIN, EXTERNAL_RCPT, FAKE_MAILS_DIR,
                       POSTFIX, SMTP_P, SM_URL, build_message, imap_starttls,
                       insecure_tls_ctx)
 
+HELO = "test-runner.test.local"
+"""The name every session of this suite greets with.
+
+It resolves in the stack's own resolver. Without it smtplib
+greets with the address literal of the container, on which the
+SPF policy service of the 1 line fails with SERVFAIL, and
+postfix then answers 450 to every recipient.
+"""
+
 EXTERNAL_SENDER = "outsider@extern.local"
 
 
@@ -60,9 +69,8 @@ def test_inbound_mail_reaches_the_mailbox(provision_mail_accounts,
     greylist configuration of this line exists for."""
     raw = build_message(unique_subject, "inbound body",
                         EXTERNAL_SENDER, ALICE)
-    with smtplib.SMTP(POSTFIX, SMTP_P, timeout=30) as smtp:
-        code, _ = smtp.docmd("EHLO", "test-runner.test.local")
-        assert code == 250
+    with smtplib.SMTP(POSTFIX, SMTP_P, timeout=30,
+                      local_hostname=HELO) as smtp:
         refused = smtp.sendmail(EXTERNAL_SENDER, [ALICE], raw)
         assert refused == {}, f"recipient refused: {refused}"
 
@@ -78,12 +86,13 @@ def test_authenticated_submission_leaves_for_the_foreign_mx(
     recipient and its body."""
     raw = build_message(unique_subject, "outbound body",
                         ALICE, EXTERNAL_RCPT)
-    with smtplib.SMTP(POSTFIX, SMTP_P, timeout=30) as smtp:
-        smtp.ehlo("test-runner.test.local")
+    with smtplib.SMTP(POSTFIX, SMTP_P, timeout=30,
+                      local_hostname=HELO) as smtp:
+        smtp.ehlo(HELO)
         # This line offers SASL only over TLS (smtpd_tls_auth_only), so
         # the handshake comes first.
         smtp.starttls(context=insecure_tls_ctx())
-        smtp.ehlo("test-runner.test.local")
+        smtp.ehlo(HELO)
         smtp.login(ALICE, ALICE_PW)
         refused = smtp.sendmail(ALICE, [EXTERNAL_RCPT], raw)
         assert refused == {}, f"recipient refused: {refused}"
@@ -121,7 +130,8 @@ def test_webmail_shows_the_delivered_mail(provision_mail_accounts, page,
     delivered over SMTP — the screen Marc's users actually look at."""
     raw = build_message(unique_subject, "webmail body",
                         EXTERNAL_SENDER, ALICE)
-    with smtplib.SMTP(POSTFIX, SMTP_P, timeout=30) as smtp:
+    with smtplib.SMTP(POSTFIX, SMTP_P, timeout=30,
+                      local_hostname=HELO) as smtp:
         smtp.sendmail(EXTERNAL_SENDER, [ALICE], raw)
     assert _wait_for_subject(unique_subject), (
         "the mail for the webmail test never arrived over IMAP")

@@ -857,6 +857,26 @@ services:
     networks: [mail, ui-net, antispam]
     command: ["pytest", "-v", "--tb=short"]
 
+  # The dependency audit of the test suite, run by `npm run audit`. It
+  # needs the advisory database on the internet, so it stays off every
+  # network of the stack and uses the default one; `--no-deps` keeps it
+  # from starting the stack.
+  audit:
+    build:
+      context: .
+      dockerfile: Dockerfile.playwright
+    command:
+      - pip-audit
+      - --strict
+      - --requirement
+      - requirements.playwright.txt
+      - --requirement
+      - /v1-requirements.txt
+    volumes:
+      # the manifest of the version-line-1 suite, which lies outside
+      # the build context of this image
+      - ../v1/requirements.txt:/v1-requirements.txt:ro
+
 networks:
   mail:
   db-net:

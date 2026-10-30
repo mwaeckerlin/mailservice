@@ -1,6 +1,6 @@
 {
   "name": "@mwaeckerlin/mailservice",
-  "version": "3.5.3",
+  "version": "3.5.4",
   "scripts": {
     "build": "docker compose build",
     "start": "docker compose up --build --force-recreate --remove-orphans",
@@ -10,7 +10,7 @@
     "start:local:daemon": "docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build --force-recreate --remove-orphans",
     "stop": "docker compose down",
     "test": "npm run test:coverage && npm run test:image && npm run test:compose && npm run test:queue && npm run test:e2e",
-    "audit": "pip-audit -r tests/e2e/requirements.playwright.txt && pip-audit -r tests/v1/requirements.txt",
+    "audit": "docker compose -f tests/e2e/docker-compose.yml run --rm --build --no-deps audit",
     "test:coverage": "bash tests/coverage-guard.sh",
     "test:compose": "bash tests/compose-contract.sh",
     "test:queue": "bash tests/queue-persistence.sh",
