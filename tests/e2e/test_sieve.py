@@ -5,12 +5,17 @@ Tests:
 - Upload, list, activate, delete scripts
 - Filter mails into a custom folder by Subject header
 - Multiple rules in one script
+- A `:regex` condition compares case-insensitively unless the script
+  names `i;octet`, and both forms are measured against the same subject
 - SIEVE_MAX_SCRIPT_SIZE is EFFECTIVE (against dovecot-mark, which runs
   with a testable 1k limit) — an oversized upload is refused, a small
   one still accepted; the knob is enforced, not just validated
 """
 import imaplib
+import os
+import pathlib
 import time
+import uuid
 import pytest
 from conftest import (
     DOVECOT, DOVECOT_MARK, SIEVE_P, IMAP_P,
@@ -21,6 +26,10 @@ from helpers.managesieve import ManageSieveClient, ManageSieveError
 
 
 SCRIPT_NAME = "e2e-test-script"
+
+# The mail store of the foreign MX (mwaeckerlin/fake-smtp). Nothing this
+# server generates by itself may ever appear there.
+FAKE_MAILS_DIR = os.environ.get("FAKE_MAILS_DIR", "/fake-mails")
 
 SIEVE_FILEINTO = """\
 require ["fileinto"];
@@ -38,6 +47,28 @@ if header :contains "Subject" "SIEVE-IMPORTANT" {
 }
 if header :contains "Subject" "SIEVE-SPAM" {
     fileinto "Junk";
+    stop;
+}
+"""
+
+
+# A rule for subjects without a single lowercase letter, the shape the
+# webmail's regular-expression condition produces. Sieve compares with
+# i;ascii-casemap unless a comparator is named, and that folds the
+# subject to one case before the expression sees it — the negated class
+# then excludes the capitals too and the rule matches nothing at all.
+SIEVE_REGEX_FOLDED = """\
+require ["fileinto","regex"];
+if header :regex "Subject" "^[^a-z]+$" {
+    fileinto "Shouting";
+    stop;
+}
+"""
+
+SIEVE_REGEX_OCTET = """\
+require ["fileinto","regex"];
+if header :regex :comparator "i;octet" "Subject" "^[^a-z]+$" {
+    fileinto "Shouting";
     stop;
 }
 """
@@ -202,3 +233,127 @@ def test_sieve_multiple_rules(unique_subject):
 
     assert _imap_search(subj_imp,  "Important"), "Important mail not routed correctly"
     assert _imap_search(subj_spam, "Junk"),      "Spam mail not routed correctly"
+
+
+def test_sieve_reject_delivers_and_sends_nothing(unique_subject):
+    """A `reject` in a user script delivers the message and sends no mail
+    of its own.
+
+    Two rules decide this: everything accepted at SMTP time is
+    delivered, and everything suspected of being spam is refused before
+    acceptance, by the rspamd milter. A rejection generated at delivery
+    time would travel to the envelope sender, which unwanted mail
+    forges — backscatter to an innocent address, and the blocklists that
+    follow. So `submission_host` stays unset, the message reaches INBOX
+    through the implicit keep, and the foreign MX receives nothing."""
+    subject = f"SIEVE-REJECT {unique_subject}"
+    script = ('require ["reject"];\n'
+              f'if header :contains "Subject" "SIEVE-REJECT" {{\n'
+              '    reject "Your Message has been identified as SPAM.";\n'
+              '    stop;\n'
+              '}\n')
+
+    before = sorted(p.name for p in pathlib.Path(FAKE_MAILS_DIR).glob("*")) \
+        if pathlib.Path(FAKE_MAILS_DIR).is_dir() else []
+
+    with ManageSieveClient(DOVECOT, SIEVE_P) as ms:
+        ms.authenticate(ALICE, ALICE_PW)
+        ms.put_script(SCRIPT_NAME, script)
+        ms.set_active(SCRIPT_NAME)
+
+    smtp_send(subject)
+
+    assert _imap_search(subject, "INBOX"), (
+        "the message was accepted at SMTP time, so it must be delivered; "
+        "a rejecting script must not make it disappear")
+
+    time.sleep(5)
+    after = sorted(p.name for p in pathlib.Path(FAKE_MAILS_DIR).glob("*")) \
+        if pathlib.Path(FAKE_MAILS_DIR).is_dir() else []
+    assert after == before, (
+        "the server sent mail of its own while rejecting: "
+        f"{set(after) - set(before)} — a forged envelope sender would "
+        "receive it")
+
+
+def test_sieve_fileinto_creates_a_missing_folder(unique_subject):
+    """`fileinto` into a folder that does not exist yet creates it and
+    delivers there (`lda_mailbox_autocreate = yes`).
+
+    The home of a user and the root of his maildir are the same path, so
+    the active script lies among the mailboxes as `.dovecot.sieve`. While
+    autocreating, Dovecot walks that directory, takes the script file for
+    a mailbox, fails on `stat(.dovecot.sieve/tmp)` with ENOTDIR and
+    aborts the whole delivery with a temporary error — Postfix then
+    defers the mail instead of delivering it, and no rule of the script
+    takes effect."""
+    folder = f"Autocreated{uuid.uuid4().hex[:8]}"
+    subject = f"SIEVE-AUTOCREATE {unique_subject}"
+    script = ('require ["fileinto"];\n'
+              f'if header :contains "Subject" "SIEVE-AUTOCREATE" {{\n'
+              f'    fileinto "{folder}";\n'
+              '    stop;\n'
+              '}\n')
+
+    with ManageSieveClient(DOVECOT, SIEVE_P) as ms:
+        ms.authenticate(ALICE, ALICE_PW)
+        ms.put_script(SCRIPT_NAME, script)
+        ms.set_active(SCRIPT_NAME)
+
+    smtp_send(subject)
+
+    assert _imap_search(subject, folder, retries=30), (
+        f"the mail did not reach the autocreated folder {folder}; a "
+        "delivery deferred with a temporary error means Dovecot took the "
+        "sieve script file for a mailbox")
+
+
+def test_sieve_regex_without_comparator_folds_case(unique_subject):
+    """A `:regex` condition without `:comparator` is compared
+    case-insensitively, so `^[^a-z]+$` excludes the capitals as well and
+    matches no subject at all. A rule built that way is dead, and where
+    it ends in `reject` the mail is gone instead — which looks exactly
+    like one single filter being broken."""
+    subject = f"SIEVE-SHOUTING {unique_subject}".upper()
+
+    with imap_starttls() as conn:
+        conn.login(ALICE, ALICE_PW)
+        conn.create("Shouting")
+
+    with ManageSieveClient(DOVECOT, SIEVE_P) as ms:
+        ms.authenticate(ALICE, ALICE_PW)
+        ms.put_script(SCRIPT_NAME, SIEVE_REGEX_FOLDED)
+        ms.set_active(SCRIPT_NAME)
+
+    smtp_send(subject)
+
+    assert _imap_search(subject, "INBOX"), \
+        "the folded rule matched a shouting subject — Pigeonhole changed " \
+        "its comparator default and the note in .claude/CLAUDE.md is stale"
+    assert not _imap_search(subject, "Shouting", retries=2), \
+        "the folded rule must match nothing"
+
+
+def test_sieve_regex_with_i_octet_is_case_sensitive(unique_subject):
+    """Naming `i;octet` makes the same expression mean what it says: a
+    subject without a lowercase letter is filed, an ordinary one is
+    not."""
+    shouting = f"SIEVE-SHOUTING {unique_subject}".upper()
+    ordinary = f"Sieve ordinary {unique_subject}"
+
+    with imap_starttls() as conn:
+        conn.login(ALICE, ALICE_PW)
+        conn.create("Shouting")
+
+    with ManageSieveClient(DOVECOT, SIEVE_P) as ms:
+        ms.authenticate(ALICE, ALICE_PW)
+        ms.put_script(SCRIPT_NAME, SIEVE_REGEX_OCTET)
+        ms.set_active(SCRIPT_NAME)
+
+    smtp_send(shouting)
+    smtp_send(ordinary)
+
+    assert _imap_search(shouting, "Shouting"), \
+        "the case-sensitive rule did not file the shouting subject"
+    assert _imap_search(ordinary, "INBOX"), \
+        "the case-sensitive rule swallowed an ordinary subject"

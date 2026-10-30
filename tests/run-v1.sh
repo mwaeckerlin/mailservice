@@ -43,6 +43,13 @@ EXIT=0
 docker compose -f "$COMPOSE" run --rm test-runner pytest -v --tb=short "$@" || EXIT=$?
 
 if [[ $EXIT -ne 0 ]]; then
+    # Branch 1 logs auth debug by default, which floods the tail of the
+    # dovecot log and buries the delivery error. Pull the lines that
+    # matter out of the whole log first.
+    echo "---- dovecot: errors and sieve ----"
+    docker compose -f "$COMPOSE" logs --no-color dovecot 2>&1 \
+        | grep -iE 'error|fatal|warning|sieve|lmtp' | tail -80 || true
+
     echo "==> Collecting logs on failure..."
     for svc in postfix dovecot postgrey postfixadmin postfixadmin-proxy \
                snappymail snappymail-proxy fake-smtp dns certs-init \

@@ -11,6 +11,7 @@ import urllib.request
 import uuid
 
 import pytest
+from playwright.sync_api import expect
 
 
 # dovecot forbids cleartext auth by default (auth_allow_cleartext=no), so
@@ -345,6 +346,22 @@ def sm_domain_ready(provision_mail_accounts, browser):
     smtp_host.fill("postfix")
     smtp_host.fill("postfix")
     page.locator("input[name='SMTP[port]']").fill("25")
+
+    # ManageSieve: without it the webmail shows no «Filters» settings
+    # screen at all, so a user cannot write a single filter. The port is
+    # dovecot's ManageSieve listener (4190), unencrypted inside the stack.
+    # The checkbox of the Checkbox component is a hidden input inside a
+    # label (templates/Views/Components/Checkbox.html), so it is the
+    # label that is clicked; the host field appears with it.
+    page.locator("label[for='tab-sieve']").click()
+    sieve_panel = page.locator("div.tab-content").filter(
+        has=page.locator("input[name='Sieve[host]']"))
+    sieve_panel.locator("label.e-checkbox").first.click()
+    sieve_host = page.locator("input[name='Sieve[host]']")
+    expect(sieve_host).to_be_visible(timeout=10_000)
+    sieve_host.fill(DOVECOT)
+    sieve_host.fill(DOVECOT)
+    page.locator("input[data-bind*='textInput: sievePort']").fill("4190")
 
     # Fill domain Name last — hosts are already set so auto-fill won't overwrite
     page.locator("input[name='Name']").fill(DOMAIN)

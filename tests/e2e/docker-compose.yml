@@ -579,7 +579,12 @@ services:
 
   smtp-relay:
     build: ../../smtp-relay
+    # Without a name postfix greets with the container id, which docker
+    # fills from the container hash. That name resolves nowhere, and on
+    # 2026-10-27 it put a production address on the Spamhaus lists.
+    hostname: relay.test.local
     environment:
+      MAILHOST: relay.test.local
       # the isolated e2e resolver cannot answer the RBL zones — every
       # lookup would stall the SMTP dialogue until the resolver timeout
       DISABLE_DNSBL: "yes"
@@ -601,16 +606,23 @@ services:
 
   smtp-relay-tls:
     build: ../../smtp-relay-tls
+    hostname: test.local
     environment:
-      MAILHOST: test.local        # cert path under /etc/letsencrypt/live/
+      MAILHOST: test.local        # cert path, and the name postfix announces
     volumes:
       - letsencrypt:/etc/letsencrypt:ro
+    # The isolated resolver, like the two siblings: with the host's
+    # resolver this container resolves real domains and would deliver to
+    # real mail servers from the machine the suite runs on.
+    dns: ["10.100.0.2"]
     depends_on:
       certs-init: { condition: service_completed_successfully }
-    networks: [mail]
+      dns:        { condition: service_healthy }
+    networks: [mail, dns-net]
 
   mailforward:
     build: ../../mailforward
+    hostname: fwd.local
     environment:
       MAILHOST: fwd.local
       # forward@fwd.local is forwarded to sink@extern.local, whose MX

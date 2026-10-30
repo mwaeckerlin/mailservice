@@ -1,0 +1,6 @@
+# Clones of the upstream projects this stack installs from the
+# distribution packages: dovecot-core and pigeonhole. They are here to
+# carry a patch towards an upstream merge request, so they are neither
+# a submodule of this repository nor part of any image build. Remove
+# the directory once the change is upstream.
+/upstream/

@@ -158,6 +158,54 @@ The database user needs `ALTER`/`CREATE` privileges for the upgrade to succeed.
 
 Postfix answers `250 Ok` as soon as a mail is safely written (fsync) into its queue — from that moment the server owns delivery and the sender never retries. A deferred mail (receiver greylisting, dovecot briefly down, remote MX unreachable) can sit in the queue for hours or days. The compose file therefore maps `/var/spool/postfix` of every postfix-based service to a **named volume** (`postfix-spool`, `mailforward-spool`) — without it, a container recreate or image update silently destroys accepted-but-undelivered mail. `tests/compose-contract.sh` pins this: the suite fails if the queue volume is ever removed.
 
+### Replicas on shared storage (Docker Swarm on CephFS)
+
+The shipped `docker-compose.yml` declares no `deploy:` block, so every service runs with the Swarm default of one replica, and each stateful service writes to a named Docker volume (`postfix-spool`, `mailforward-spool`, `dkim-keys`, `redis-data`, `clamav-db`, `postfixadmin-db`). Replacing those named volumes with a host path on CephFS and raising `deploy.replicas` above 1 puts several independent processes on different nodes on one directory tree at the same time. The table says what each service tolerates, the sections below give the source for each answer.
+
+| Service | Replicas | On-disk state | Reason |
+|---|---|---|---|
+| postfix | 1 per queue directory | `/var/spool/postfix` | Postfix queues cannot be shared between instances |
+| mailforward | 1 per queue directory | `/var/spool/postfix` | same engine, same queue rule |
+| dovecot | 1 per user at a time | `/var/mail/domains`, `dovecot.index*`, `dovecot.list.index*`, `dovecot-uidlist` | Dovecot does not support one user accessed by two servers |
+| rspamd | several | `/var/lib/rspamd/dkim` (keys, `key_table`, `signing_table`) | Bayes, greylist and ratelimit live in Redis; the DKIM directory is read after start-up |
+| redis | 1 writer | `/data` | one process owns the dataset; replication is Redis's own mechanism |
+| clamav | several, each with its own database directory | `/var/lib/clamav` | signatures are a downloaded copy, no documented multi-writer support |
+| postfixadmin | several, with a shared session store | none | all account data is in MariaDB |
+| postfixadmin-proxy | several | none | nginx reverse proxy without state |
+| postfixadmin-db (MariaDB) | 1 | `/var/lib/mysql` | one `mysqld` owns its data directory |
+| snappymail | 1, or several with a shared session store and a server-based contacts DSN | `/app/data` | configuration, user preferences and sessions are flat files |
+
+#### Postfix — one instance per queue
+
+Postfix states the rule for its own queue directly: «NFS is not an issue because you cannot share Postfix queues among multiple Postfix instances» ([NFS_README](https://www.postfix.org/NFS_README.html)). The same document names the price of a queue on a network file system at all: «Thus, Postfix on NFS is slightly less reliable than Postfix on a local disk.» The multi-instance document repeats it for instances on one host: several `master(8)` copies share the software and «do not (and cannot) share configuration, queue, or data directories» ([MULTI_INSTANCE_README](https://www.postfix.org/MULTI_INSTANCE_README.html)). For mailbox files Postfix requires `fcntl()` locks over NFS; the queue is excluded from that discussion because it is never shared.
+
+Two Postfix replicas on one CephFS directory therefore run two queue managers over one set of queue files, and the queue file names derive from inode numbers, which the FAQ names as the reason queue files may not be moved between file systems ([Postfix FAQ](https://www.postfix.org/faq.html)). Run `postfix` and `mailforward` with `deploy.replicas: 1` and give each replica its own queue path if more than one is wanted. To spread SMTP load, run several Postfix services, each with its own queue directory, behind one virtual address; each queue is then owned by exactly one process and a failed node's queue is taken over by starting one new instance on that directory.
+
+#### Dovecot — one server per user at a time
+
+Dovecot's rule is about the user, not the file system: «Dovecot does **not** support accessing the same user simultaneously by different servers», and «That will result in more or less severe mailbox corruption» ([Dovecot NFS](https://doc.dovecotpro.com/main/core/config/nfs.html)). The documented cluster setup routes every user to one server, with Dovecot director and LMTP for delivery, and sets `mmap_disable = yes` and `mail_fsync = always`, while `mail_nfs_index` and `mail_nfs_storage` stay at `no`. The page describes clustering without that routing as a setup that produces random errors and can lose mail. `lock_method` appears in the mailbox-format documentation: `fcntl` is the default, `flock` and `dotlock` are the alternatives, and `dotlock` is the slowest ([Mailbox Formats](https://doc.dovecot.org/2.3/admin_manual/mailbox_formats/)).
+
+The property the NFS page is written about is cache coherency between clients, and CephFS states its own behaviour against exactly that: «in contrast to many other common network file systems like NFS, CephFS maintains strong cache coherency across clients», and «It relaxes strictly less than NFS when it comes to multiclient consistency» ([Differences from POSIX](https://docs.ceph.com/en/latest/cephfs/posix/)). CephFS supports `fcntl` and `flock` locks, coordinated by the MDS ([Capabilities in CephFS](https://docs.ceph.com/en/latest/cephfs/capabilities/)). One divergence on the same page is the one Dovecot's `mmap_disable` addresses: for shared writable `mmap`, «writes are not coherently propagated to other clients' caches». Dovecot memory-maps its index files by default, so `mmap_disable = yes` is required on CephFS for the same reason it is required on NFS. The second divergence is write atomicity: «In shared simultaneous writer situations, a write that crosses object boundaries is not necessarily atomic.»
+
+This stack stores Maildir at `mail_path = /var/mail/domains/%{user | domain}/%{user | username}` with `mail_driver = maildir` (`dovecot/local.conf`). Running more than one Dovecot replica on that tree is allowed only when every connection and every delivery for one user reaches the same replica: IMAP, POP3, ManageSieve and the LMTP delivery from Postfix alike. Load is then spread by user, not by connection. Open question, to be measured before raising the replica count: whether the index and `dovecot-uidlist` corruption Dovecot describes is observable on CephFS with `mmap_disable = yes`, `mail_fsync = always` and `lock_method = fcntl` when two replicas open one mailbox; the measurement is two Dovecot instances on one CephFS mount, appending and expunging in the same mailbox, checked with `doveadm force-resync` and the message count afterwards.
+
+#### rspamd — Bayes in Redis, DKIM keys on disk
+
+The Bayes classifier of this stack writes nothing to disk: `rspamd/classifier-bayes.conf` sets `backend = "redis";`, and `rspamd/redis.conf` points every Redis-backed module at one server, `servers = "${REDIS_HOST}:${REDIS_PORT}";`, configured from `REDIS_HOST` and `REDIS_PORT`. Greylist, ratelimit and fuzzy caches use the same Redis. Rspamd's architecture documentation names Redis as the shared state for multi-instance deployments, with all instances connecting to the same Redis ([Rspamd Architecture](https://docs.rspamd.com/developers/architecture/)); the replication tutorial describes the larger case of several Redis instances with `read_servers` and `write_servers` ([Multi-instance Redis replication](https://docs.rspamd.com/tutorials/redis_replication/)).
+
+What remains on `/var/lib/rspamd` is the DKIM material: `init.cpp` sets `DKIM_DIR = "/var/lib/rspamd/dkim"`, generates a 2048-bit key per domain when `<selector>-<domain>.key` is missing, and rewrites `key_table` and `signing_table` on every start. Several replicas may therefore share that directory while they run, because after start-up rspamd only reads it. The write happens at start-up, and two replicas starting at the same moment on one empty directory each generate a key for the same domain and each overwrite `key_table`, which leaves one published DNS record matching one of the two keys. Start the first replica alone, confirm the key files exist and the DNS TXT records are published, then scale up. `autolearn = false` in `classifier-bayes.conf` means training happens only through `rspamc learn_spam` and `learn_ham`, which writes to Redis, so no replica trains on its own disk.
+
+Redis itself runs as one writer on its `/data` directory: one `redis-server` owns the dataset, and the `redis-data` volume holds the Bayes training together with the greylist and ratelimit state.
+
+#### ClamAV, PostfixAdmin, SnappyMail
+
+**ClamAV** keeps the downloaded virus signatures in `/var/lib/clamav`, filled by freshclam and read by clamd. `clamd.conf(5)` requires `DatabaseDirectory` to name the same directory in clamd and freshclam, and `ConcurrentDatabaseReload` makes a reload non-blocking by holding a second engine until the running scans finish ([clamd.conf(5)](https://manpages.debian.org/unstable/clamav-daemon/clamd.conf.5.en.html), [freshclam.conf(5)](https://manpages.debian.org/experimental/clamav-freshclam/freshclam.conf.5.en.html)). Not documented: a lock or any supported mechanism for two freshclam processes updating one directory. The directory holds a downloaded copy of a public database and no state of this installation, so give each ClamAV replica its own database directory; then every replica updates its own copy and scanning load is spread over all of them. Open question, if one shared directory is wanted anyway: whether freshclam serialises its writes, to be measured by running two freshclam processes against one directory during a `daily.cvd` update and checking the resulting files with `sigtool --info`.
+
+**PostfixAdmin** holds every account, domain and alias in MariaDB (`postfixadmin-db`, `/var/lib/mysql`), and the image declares no volume and no on-disk state beyond the Smarty compile cache `/root/var/cache/postfixadmin/templates_c`, which each replica rebuilds from the shipped templates. Several replicas are therefore allowed, with one condition: the image configures no session store, so PHP's default file session handler writes inside each container and a login made against one replica is unknown to the next. Either route a session to the same replica, or configure a shared session store. `postfixadmin-proxy` is nginx in front of it and carries no state, so it scales without a condition. MariaDB itself runs with one replica: one `mysqld` process owns its data directory.
+
+**SnappyMail** stores configuration, user preferences and session data as flat files in one data directory, mounted at `/app/data`; the config file is `data/_data_/_default_/configs/application.ini` and the plugins this stack ships are synced into `<data>/_data_/_default_/plugins/` on start. The address book is the one part that uses a database, through a PDO DSN for MySQL, PostgreSQL or SQLite set in the admin panel ([SnappyMail Admin Manual](https://github.com/the-djmaze/snappymail/wiki/Admin-Manual)). Run one replica, or run several with every session routed to the same replica and the contacts DSN pointed at MySQL or PostgreSQL rather than SQLite, which that manual advises against for many active users. Not documented: whether SnappyMail serialises writes to its flat files between processes, so a shared `/app/data` under concurrent writers has no documented guarantee.
+
+
 ### Authentication over TLS (secure default)
 
 Passwords are never accepted over an unencrypted connection. This is the default and needs no configuration:
@@ -306,7 +354,7 @@ postfix:
 
 rspamd:
   environment:
-    DOMAIN:   example.com   # required — your mail domain (single-domain form)
+    DOMAIN:   example.com   # required — your mail domain (single-domain form)
     SELECTOR: mail          # optional, default: mail
   volumes:
     - dkim-keys:/var/lib/rspamd    # per-domain private keys
@@ -318,7 +366,7 @@ On first start, rspamd's init helper runs `rspamadm dkim_keygen` per domain (204
 
 ```
 ==================================================================
-  DKIM key generated — add this DNS TXT record to example.com:
+  DKIM key generated — add this DNS TXT record to example.com:
 ==================================================================
 mail._domainkey	IN	TXT	( "v=DKIM1; h=sha256; k=rsa; "
 	  "p=MIIBIjAN..." )
@@ -446,7 +494,7 @@ Before you flip a running mailservice to `permissive` or `reject`, run in `log` 
     ```
 
     For a rspamd-side history browser, expose port 11334 and open the
-    web UI (`http://<host>:11334/`) — every scan of the last hours
+    web UI (`http://<host>:11334/`) — every scan of the last hours
     with score, symbols and headers is browsable there.
 
 5. For every `dkim=fail`, `dkim=permerror` or `dmarc=fail (p=reject)` you find, decide: is this a real sender that would get bounced under enforcement, or a broken/forged mail that _should_ be bounced? If it's a real sender, contact them so they can fix their DKIM/DMARC or their forwarding chain (a mailing list that breaks DMARC alignment must be re-signing with its own domain or rewriting `From:` for `p=reject` senders — modern Mailman does this automatically).
@@ -506,7 +554,7 @@ v3.0.0 replaces the whole legacy chain (`opendkim`, `opendmarc`, `postgrey`, `po
         networks: [antispam]
 
       postfix:
-        # your existing service — swap OPENDKIM/OPENDMARC/GREYLIST for RSPAMD:
+        # your existing service — swap OPENDKIM/OPENDMARC/GREYLIST for RSPAMD:
         environment:
           RSPAMD: rspamd
         networks:
@@ -527,7 +575,7 @@ v3.0.0 replaces the whole legacy chain (`opendkim`, `opendmarc`, `postgrey`, `po
     '
     ```
 
-    (Skip this step if you accept regenerating the keys — you would
+    (Skip this step if you accept regenerating the keys — you would
     also have to publish the new public key in DNS.)
 
 3. `docker compose up -d rspamd redis clamav postfix`. Verify with `docker compose logs rspamd` and by grepping delivered mail's `Authentication-Results:` header for a few days in `log` mode, then escalate.

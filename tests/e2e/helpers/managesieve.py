@@ -105,6 +105,26 @@ class ManageSieveClient:
                 scripts.append(m.group(1))
         return scripts
 
+    def get_script(self, name: str) -> str:
+        """The stored script, verbatim. The server answers with a literal
+        `{<octets>}` line followed by exactly that many bytes."""
+        self._send(f'GETSCRIPT "{name}"')
+        line = self._recv_line()
+        m = re.match(r'^\{(\d+)\+?\}$', line)
+        if not m:
+            raise ManageSieveError(f"GETSCRIPT failed: {line}")
+        size = int(m.group(1))
+        while len(self._buf) < size:
+            chunk = self._sock.recv(4096)
+            if not chunk:
+                raise ManageSieveError("Connection closed unexpectedly")
+            self._buf += chunk
+        script, self._buf = self._buf[:size], self._buf[size:]
+        status, msg = self._read_response()
+        if status != "OK":
+            raise ManageSieveError(f"GETSCRIPT failed: {msg}")
+        return script.decode()
+
     def delete_script(self, name: str) -> None:
         self._send(f'DELETESCRIPT "{name}"')
         status, msg = self._read_response()
