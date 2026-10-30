@@ -70,6 +70,28 @@ Full statement: README.md «Design philosophy: reliability over filtering».
   `sieve_extensions` entry: Pigeonhole 2.4.5 carries it in the default
   list, measured with `doveconf sieve_extensions`.
 
+## SnappyMail filter pitfalls
+
+- **The webmail shows no filter settings at all unless the domain
+  allows sieve scripts.** The screen `#/settings/filters` falls back to
+  `#/settings/general` without it, so a user can write no filter. The
+  init of the webmail image configures it from `SIEVE_HOST`,
+  `SIEVE_PORT` and `SIEVE_SECURE`; in the admin panel it is the SIEVE
+  tab of the domain. Pinned by the fixture `sm_domain_ready` in
+  `tests/e2e/conftest.py`.
+- **The filter FORM exists for the script `rainloop.user` alone**
+  (`dev/Sieve/Model/Script.js`, `allowFilters()`); under any other name
+  the popup offers the raw editor and no «Add a Filter» button. And the
+  popup decides once, while it opens (`beforeShow`), which of the two it
+  shows, while a script that does not exist yet carries no name — so a
+  new script always opens raw, and the form appears when the stored
+  script is opened again from the list. There the row of such a script
+  shows the label «Simple» and carries its name in the `title`
+  attribute alone.
+- **The checkbox of the Checkbox component is a hidden input inside a
+  label** (`templates/Views/Components/Checkbox.html`), so Playwright
+  waits forever on its visibility: the label is what a test clicks.
+
 ## Config migrations & component replacements
 
 On any config port across a major version, preserve the on-disk data layout
