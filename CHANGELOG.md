@@ -1,5 +1,8 @@
 # Changelog
 
+- 2026-11-02 **3.5.5**
+    - The webmail describes the admin login the way SnappyMail performs it: the password is generated on the first call of the admin panel and stands in `admin_password.txt` in the data volume, and `SNAPPYMAIL_ADMIN_PASSWORD` sets one of your own. The README had named a fixed `12345`, which no longer exists, so an operator following it could not log in.
+
 - 2026-10-30 **3.5.4**
     - The READMEs of both relays say what was measured about the Spamhaus listing of 2026-10-27 and what Spamhaus gives as its reason: the address pool, not the container name the entry carried.
     - The suite of the version line 1 measures what a filter really does to a shouting subject: the rule matches, its `reject` runs at delivery when the message is already accepted, fails there, and the implicit keep stores the message in INBOX — which is why a rule that refuses belongs in postfix. Its sender domain now resolves in the stack's own resolver and every session greets with a name, as the new plausibility checks of `postfix:1` demand.
